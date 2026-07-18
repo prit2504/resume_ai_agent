@@ -7,10 +7,11 @@ This document serves as the comprehensive source of truth for the LinkedIn Job M
 LinkedIn Job Matcher is a modular, AI-powered system that automates the process of finding relevant jobs on LinkedIn, matching them against your specific resume, and generating tailored advice to improve your chances of landing an interview.
 
 It achieves this by combining:
-- **Model Context Protocol (MCP)** for reliable LinkedIn data extraction.
-- **Local Large Language Models (Ollama / Gemma)** for structured field extraction and resume advice.
+- **Model Context Protocol (MCP)** for reliable LinkedIn data extraction natively via `stdio`.
+- **Large Language Models** for structured field extraction and resume advice (supports OpenAI, Gemini, HuggingFace, or local Ollama).
+- **Server-Sent Events (SSE)** for real-time live progress streaming to the UI.
 - **Local Vector Database (Qdrant)** for semantic similarity search.
-- **FastAPI** for backend orchestration.
+- **FastAPI** for backend orchestration with asynchronous concurrency.
 - **Next.js (App Router)** for a modern, responsive frontend dashboard.
 
 ## 2. Architecture & Tech Stack
@@ -19,101 +20,82 @@ It achieves this by combining:
 - **Framework**: Next.js 15 (App Router)
 - **Styling**: Tailwind CSS v4, Framer Motion for animations
 - **Components**: shadcn/ui (Radix UI primitives)
-- **Icons**: Lucide React
-- **Architecture**: Acts as a BFF (Backend-For-Frontend). API routes in Next.js (`/api/match`, `/api/advise`) receive `FormData` from the browser and proxy the requests to the Python FastAPI backend.
+- **Architecture**: Acts as a BFF (Backend-For-Frontend). Uses React state and `EventSource` (SSE) to display live backend scraping progress.
 
 ### Backend (`/backend`)
 - **Framework**: FastAPI, Uvicorn
-- **Architecture**: Modular Monolith (non-SOLID). The core logic is split into focused modules inside `backend/core/` (models, scraper, extractor, embedder, vector_store, resume_parser, advisor, orchestrator).
-- **LLM Engine**: Ollama (running locally), wrapping models like `gemma3:4b`.
-- **Embeddings**: Ollama (`nomic-embed-text:v1.5`).
+- **Architecture**: Modular Services. The core logic is split into focused modules inside `backend/core/` (scraper, extractor, embedder, vector_store, resume_parser, advisor, orchestrator).
+- **LLM Routing**: Separates heavy reasoning (`ADVISOR_MODEL`) from fast, concurrent JSON extraction (`EXTRACTOR_MODEL`).
 - **Vector Database**: Qdrant (running via Docker).
-- **Scraping Engine**: LinkedIn MCP Server (`https://github.com/stickerdaniel/linkedin-mcp-server`) consumed via `langchain-mcp-adapters`.
-- **PDF Parsing**: `pdfplumber` with fallback to `PyPDF2`.
+- **Scraping Engine**: LinkedIn MCP Server (`stickerdaniel/linkedin-mcp-server`) spawned natively in the background via `uvx` and `stdio`.
 
 ## 3. Workflows
 
-### A. Job Scraping Workflow
-1. User or Cron triggers the `scrape_jobs` API.
-2. The `JobMatcherOrchestrator` invokes the `LinkedInMCPScraper` with a search query.
-3. The scraper communicates with the MCP server to retrieve raw job IDs and subsequently fetches full job posting details.
-4. Raw job text is passed to the `LLMJobExtractor` which uses the local LLM to output structured JSON (Title, Company, Skills, Salary, etc.).
-5. The `OllamaEmbedder` creates a dense vector representation of the job posting.
-6. The `QdrantVectorStore` upserts the job into the database with a deterministic ID (`uuid5`) to ensure idempotency (no duplicates).
+### A. Concurrent Live Scraping Workflow
+1. User configures filters (Keywords, Location, Date Posted) in the UI and clicks "Start Live Scraping".
+2. The UI opens a Server-Sent Events (SSE) connection to `POST /api/v1/scrape/stream`.
+3. The `JobMatcherOrchestrator` invokes the `LinkedInMCPScraper` via `stdio` to retrieve raw job IDs.
+4. An `asyncio.Queue` and `asyncio.Semaphore` process the jobs concurrently (up to 3 at a time for cloud LLMs).
+5. For each job:
+   - Fetches full job posting details via MCP.
+   - `LLMJobExtractor` uses the `EXTRACTOR_MODEL` to output structured JSON.
+   - `UniversalEmbedder` creates a dense vector representation.
+   - `QdrantVectorStore` upserts the job into the database safely.
+6. Progress events (e.g., `[fetching]`, `[extracting]`) are yielded back to the frontend in real-time.
 
 ### B. Resume Matching Workflow
 1. User uploads a PDF resume on the Next.js frontend.
-2. The frontend proxies the PDF to the FastAPI `/api/v1/match` endpoint.
-3. The `PDFResumeParser` reads the raw text and uses the LLM to extract a structured `ResumeProfile` (Skills, Experience, Target Roles).
-4. The resume profile is embedded into a vector.
-5. `QdrantVectorStore` performs a cosine similarity search against the previously scraped jobs.
-6. The top-K matched jobs, along with similarity scores, are returned to the frontend and displayed in the UI.
+2. The `PDFResumeParser` reads the raw text, injects the current date into the prompt, and uses the `ADVISOR_MODEL` to extract a structured `ResumeProfile`.
+3. The profile is embedded and `QdrantVectorStore` performs a cosine similarity search against scraped jobs.
+4. The top-K matched jobs are returned to the frontend and displayed.
 
 ### C. Resume Advice Workflow
-1. User clicks "Get Advice" on a specific matched job in the frontend.
-2. Frontend proxies the request to FastAPI `/api/v1/advise`, sending the resume and the target `job_id`.
-3. `LLMResumeAdvisor` retrieves both the structured resume and the structured job posting.
-4. The local LLM compares them and generates actionable advice (Summary tweaks, Skills to add/emphasize, Experience gaps).
-5. The advice is rendered in a slide-over panel on the frontend.
+1. User clicks "Get Advice" on a specific matched job.
+2. `LLMResumeAdvisor` uses the `ADVISOR_MODEL` to compare the structured resume and the job posting.
+3. The LLM generates actionable advice (Summary tweaks, Skills to add, Experience gaps) which is rendered in a slide-over panel.
 
-## 4. Setup & Configuration
+## 4. How to Run from Scratch
 
 ### Prerequisites
-- Docker (for Qdrant)
-- Ollama installed locally
-- Node.js (v18+)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop) (for Qdrant)
+- [Node.js](https://nodejs.org/en) (v18+)
 - Python 3.12+
-- `uvx` (Astral's UV tool for running the MCP server)
+- `uv` package manager (`pip install uv`)
 
-### Step 1: Start External Services
-
+### Step 1: Start Qdrant Vector DB
 ```bash
-# 1. Start Qdrant Vector DB
 docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
-
-# 2. Start Ollama and pull models
-ollama serve
-ollama pull nomic-embed-text:v1.5
-ollama pull gemma3:4b
-
-# 3. Start LinkedIn MCP Server
-# NOTE: Requires login first!
-uvx mcp-server-linkedin@latest --login
-uvx mcp-server-linkedin@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
-### Step 2: Configure Environment Variables
+### Step 2: Login to LinkedIn MCP
+The backend will automatically spawn the MCP server for you, but you must authenticate it with your LinkedIn account first. Run this once:
+```bash
+uvx mcp-server-linkedin@latest --login
+```
+*(Follow the CLI prompts to log into your LinkedIn account. Session cookies will be saved locally.)*
 
-The project uses `python-dotenv` to manage configurations. We provide a `backend/.env.example` template. You must copy it to `backend/.env` and configure your chosen provider.
+### Step 3: Configure Environment Variables
+Copy the example environment file and configure your LLM providers.
 
 ```bash
-cp backend/.env.example backend/.env
+cd backend
+cp .env.example .env
 ```
 
-Inside `.env`, you can choose your LLM provider by setting `LLM_PROVIDER`. The backend supports **ollama**, **openai**, **gemini**, and **huggingface** natively using OpenAI-compatible endpoints.
-
+Edit `backend/.env`. You can choose your provider (`openai`, `gemini`, `huggingface`, or `ollama`):
 | Variable | Example Value | Description |
 |----------|---------------|-------------|
 | `LLM_PROVIDER` | `gemini` | `ollama`, `openai`, `gemini`, or `huggingface` |
-| `OPENAI_API_KEY` | `sk-...` | Needed if provider is openai |
-| `GEMINI_API_KEY` | `AIza...` | Needed if provider is gemini |
-| `HF_TOKEN` | `hf_...` | Needed if provider is huggingface |
-| `LLM_MODEL` | `gemini-2.5-flash` | The extraction/advice model name |
+| `ADVISOR_MODEL` | `google/gemma-3-12b-it:featherless` | The heavy reasoning model (12B+) |
+| `EXTRACTOR_MODEL`| `google/gemma-3-4b-it:featherless` | The fast, lightweight JSON extraction model (4B-8B) |
 | `EMBED_MODEL`| `text-embedding-004`| The embedding model name |
 | `EMBED_DIM` | `768` | Vector dimension of the embed model |
+| `GEMINI_API_KEY` | `AIza...` | Needed if provider is gemini |
+| `OPENAI_API_KEY` | `sk-...` | Needed if provider is openai |
+| `HF_TOKEN` | `hf_...` | Needed if provider is huggingface |
 | `LLM_BASE_URL` | `http://localhost:11434/v1` | Used only if provider is `ollama` |
-| `EMBED_BASE_URL`| `http://localhost:11434/v1` | Used only if provider is `ollama` |
-| `QDRANT_URL` | `http://localhost:6333` | Vector DB endpoint |
-| `QDRANT_COLLECTION`| `linkedin_jobs` | Qdrant Collection name |
-| `MCP_LINKEDIN_URL` | `http://localhost:8080/mcp` | MCP server endpoint |
 
-In the `frontend_v2` directory:
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BACKEND_URL` | `http://127.0.0.1:8000` | Points to FastAPI server |
-
-### Step 3: Run the Backend
-
+### Step 4: Run the Backend
 ```bash
 cd backend
 python -m venv venv
@@ -122,17 +104,18 @@ python -m venv venv
 pip install -r requirements.txt
 
 # Start the FastAPI server
-python -m uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 ```
+*(Note: Do not run a separate MCP HTTP server! The backend spawns it automatically via `stdio`.)*
 
-### Step 4: Run the Frontend
-
+### Step 5: Run the Frontend
+Open a new terminal window:
 ```bash
 cd frontend_v2
 npm install
 npm run dev
-# Dashboard available at http://localhost:3000
 ```
+Open your browser to `http://localhost:3000` to access the dashboard!
 
 ## 5. Acknowledgements & Open Source
 This project leverages the power of the **Model Context Protocol (MCP)** to interact safely and efficiently with LinkedIn's platform. Specifically, it utilizes the [LinkedIn MCP Server](https://github.com/stickerdaniel/linkedin-mcp-server) by @stickerdaniel. 
