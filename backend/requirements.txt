@@ -1,0 +1,31 @@
+# LinkedIn Job Matcher — Python Dependencies
+# ==========================================
+# Install: uv pip install -r requirements.txt
+
+# Core async & HTTP
+httpx>=0.27.0
+
+# API Server
+fastapi>=0.111.0
+uvicorn>=0.30.0
+
+# MCP Client
+langchain-mcp-adapters>=0.1.0
+
+# LLM / Embeddings (OpenAI-compatible local endpoints)
+openai>=1.35.0
+
+# Vector Database
+qdrant-client>=1.9.0
+
+# Resume Parsing
+pdfplumber>=0.11.0
+PyPDF2>=3.0.0
+
+# Data validation & typing
+pydantic>=2.7.0
+
+# CLI & utilities
+python-dotenv>=1.0.0
+
+python-dotenv
