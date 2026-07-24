@@ -39,6 +39,7 @@ class LLMJobExtractor:
         '  "salary_range": string or null,\n'
         '  "benefits": [string] or null,\n'
         '  "remote_type": one of ["remote","hybrid","onsite", null],\n'
+        '  "hr_email": string or null,\n'
         '  "description": string\n'
         "}"
     )

@@ -77,6 +77,7 @@ class JobPosting:
     benefits: tuple[str, ...] | None
     remote_type: WorkType
     description: str
+    hr_email: str | None = None
     search_keywords: str | None = None
     search_location: str | None = None
     first_seen_at: datetime | None = None
@@ -107,6 +108,7 @@ class JobPosting:
             "benefits": list(self.benefits) if self.benefits else None,
             "remote_type": self.remote_type.value if self.remote_type else None,
             "description": self.description,
+            "hr_email": self.hr_email,
             "search_keywords": self.search_keywords,
             "search_location": self.search_location,
             "first_seen_at": self.first_seen_at.isoformat() if self.first_seen_at else None,

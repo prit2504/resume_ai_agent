@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from .models import EmploymentType, JobPosting, MatchedJob, ResumeAdvice, SeniorityLevel, WorkType, safe_enum
+from .models import EmploymentType, JobPosting, MatchedJob, ResumeAdvice, ResumeProfile, SeniorityLevel, WorkType, safe_enum
 from .scraper import LinkedInMCPScraper
 from .extractor import LLMJobExtractor
 from .embedder import UniversalEmbedder
@@ -118,6 +118,7 @@ class JobMatcherOrchestrator:
                 benefits=_to_tuple(fields.get("benefits")) if fields.get("benefits") else None,
                 remote_type=safe_enum(WorkType, fields.get("remote_type")),
                 description=fields.get("description", ""),
+                hr_email=fields.get("hr_email"),
                 search_keywords=keywords,
                 search_location=location,
                 first_seen_at=first_seen or now,
@@ -239,6 +240,7 @@ class JobMatcherOrchestrator:
                         benefits=_to_tuple(fields.get("benefits")) if fields.get("benefits") else None,
                         remote_type=safe_enum(WorkType, fields.get("remote_type")),
                         description=fields.get("description", ""),
+                        hr_email=fields.get("hr_email"),
                         search_keywords=keywords,
                         search_location=location,
                         first_seen_at=first_seen or now,
@@ -321,12 +323,88 @@ class JobMatcherOrchestrator:
                 benefits=tuple(payload.get("benefits", [])) if payload.get("benefits") else None,
                 remote_type=safe_enum(WorkType, payload.get("remote_type")),
                 description=payload.get("description", ""),
+                hr_email=payload.get("hr_email"),
             )
             score = result.get("score", 0.0)
             matched.append(MatchedJob(job=job, similarity_score=score))
 
         matched.sort(key=lambda m: m.similarity_score, reverse=True)
         return matched
+
+    def write_email_for_job(
+        self,
+        job: JobPosting,
+        resume_profile: ResumeProfile,
+    ) -> tuple[str, str]:
+        """
+        Use the existing LLM client (already wired in via api.py) to write a
+        personalised job application email.
+
+        Richer than agent.py's write_email node because it incorporates the
+        candidate's actual skills, experience years and summary from the resume.
+
+        Returns:
+            (subject, body) — both plain strings ready to hand to EmailMCPClient.
+        """
+        # Build top-N lists safely even when tuples are empty
+        skills_str        = ", ".join(list(resume_profile.skills)[:8])      or "various technical skills"
+        job_skills_str    = ", ".join(list(job.skills)[:6])                 or "relevant skills"
+        responsibilities  = "; ".join(list(job.key_responsibilities)[:3])   or "(see job description)"
+
+        prompt = f"""You are a professional job applicant writing a concise job application email.
+
+Candidate Profile:
+- Name: {resume_profile.name or 'Applicant'}
+- Experience: {resume_profile.experience_years or 'N/A'} years
+- Key Skills: {skills_str}
+- Summary: {resume_profile.summary or 'Experienced professional seeking new opportunities'}
+
+Job Details:
+- Company: {job.company or 'the company'}
+- Role: {job.title or 'the position'}
+- Location: {job.location or 'N/A'}
+- Required Skills: {job_skills_str}
+- Key Responsibilities: {responsibilities}
+
+Write a professional, concise job application email (max 150 words).
+Return ONLY in this exact format with no extra text:
+SUBJECT: <subject line>
+BODY: <full email body>"""
+
+        try:
+            resp = self._extractor._client.chat.completions.create(
+                model=self._extractor._model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=400,
+                temperature=0.4,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+        except Exception as exc:
+            print(f"  ! write_email_for_job LLM call failed: {exc}")
+            raw = ""
+
+        subject, body = "", ""
+        for line in raw.split("\n"):
+            if line.startswith("SUBJECT:"):
+                subject = line.replace("SUBJECT:", "").strip()
+            elif line.startswith("BODY:"):
+                body = line.replace("BODY:", "").strip()
+            elif body:
+                body += "\n" + line
+
+        # Graceful fallbacks so a failed LLM call never crashes the endpoint
+        if not subject:
+            subject = f"Application for {job.title or 'the position'} at {job.company or 'your company'}"
+        if not body:
+            body = raw or (
+                f"Dear Hiring Team,\n\n"
+                f"I am writing to express my interest in the {job.title or 'open'} role at "
+                f"{job.company or 'your company'}. "
+                f"Please find my resume attached for your consideration.\n\n"
+                f"Best regards,\n{resume_profile.name or 'Applicant'}"
+            )
+
+        return subject, body
 
     def advise_for_job(
         self,

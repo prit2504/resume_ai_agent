@@ -8,6 +8,7 @@ Run: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 
 from __future__ import annotations
 
+import csv
 import os
 import tempfile
 import uuid
@@ -32,6 +33,7 @@ from core.vector_store import QdrantVectorStore
 from core.resume_parser import PDFResumeParser
 from core.advisor import LLMResumeAdvisor
 from core.orchestrator import JobMatcherOrchestrator
+from core.email_clint import EmailMCPClient
 from openai import OpenAI
 from qdrant_client import QdrantClient
 
@@ -164,14 +166,36 @@ class MatchResponse(BaseModel):
     resume: dict[str, Any]
     matches: list[dict[str, Any]]
 
-
-
-
-
 class AdviceResponse(BaseModel):
     success: bool
     advice: dict[str, Any]
 
+class ApplyResponse(BaseModel):
+    success: bool
+    job_id: str
+    hr_email: str
+    email_sent: bool
+    email_str: dict[str, Any] | None
+
+
+class BulkApplyResult(BaseModel):
+    job_id: str
+    company: str | None
+    title: str | None
+    hr_email: str
+    subject: str
+    sent: bool
+    error: str
+    dry_run: bool
+
+
+class BulkApplyResponse(BaseModel):
+    success: bool
+    total_attempted: int
+    sent_count: int
+    failed_count: int
+    dry_run: bool
+    results: list[dict[str, Any]]
 
 # ── API Endpoints ────────────────────────────────────────────────────────────
 
@@ -330,7 +354,7 @@ async def get_advice(
             benefits=tuple(target_payload.get("benefits", [])) if target_payload.get("benefits") else None,
             remote_type=safe_enum(WorkType, target_payload.get("remote_type")),
             description=target_payload.get("description", ""),
-
+            hr_email=target_payload.get("hr_email"),
         )
 
         advice = orch._resume_advisor.generate_advice(resume_profile, job)
@@ -358,3 +382,284 @@ async def get_advice(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ── New: Export jobs-with-emails to CSV ──────────────────────────────────────
+
+@app.post("/api/v1/export-hr-csv")
+async def export_hr_csv(
+    resume: UploadFile = File(...),
+    top_k: int = Form(default=50),
+    csv_save_path: str = Form(default="hr_contacts_export.csv"),
+) -> dict[str, Any]:
+    """
+    Match a resume against stored jobs, filter those that have an HR email,
+    and export them to a CSV file in the format agent.py / server.py expect.
+
+    Extra columns (location, skills, job_id, similarity_score, linkedin_url)
+    are appended so the exported CSV is richer than the original hr_contacts.csv.
+    """
+    if not resume.filename or not resume.filename.endswith(".pdf"):
+        raise HTTPException(400, "Only PDF resumes are supported")
+
+    suffix = f"_{uuid.uuid4().hex[:8]}.pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await resume.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        orch = get_orchestrator()
+        matches = orch.match_resume(tmp_path, top_k=top_k)
+
+        # Keep only jobs that carry an HR email
+        email_jobs = [m for m in matches if m.job.hr_email]
+        if not email_jobs:
+            return {
+                "success": False,
+                "message": "No matched jobs have an HR email address",
+                "count": 0,
+                "csv_path": "",
+            }
+
+        # Build rows — first four columns keep agent.py / server.py compatibility
+        rows = [
+            {
+                "name":             "HR Team",
+                "email":            m.job.hr_email,
+                "company":          m.job.company or "",
+                "job_title":        m.job.title or "",
+                "location":         m.job.location or "",
+                "skills":           ", ".join(m.job.skills),
+                "job_id":           m.job.job_id,
+                "similarity_score": round(m.similarity_score, 4),
+                "linkedin_url":     m.job.linkedin_url,
+            }
+            for m in email_jobs
+        ]
+
+        fieldnames = list(rows[0].keys())
+        with open(csv_save_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return {
+            "success":  True,
+            "count":    len(rows),
+            "csv_path": csv_save_path,
+            "preview":  rows[:5],
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+# ── New: Apply to a single job ────────────────────────────────────────────────
+
+@app.post("/api/v1/apply/{job_id}", response_model=ApplyResponse)
+async def apply_to_job(
+    job_id: str,
+    resume: UploadFile = File(...),
+    pdf_attachment_path: str = Form(default=""),
+) -> ApplyResponse:
+    """
+    Write a personalised application email with the LLM (using both resume
+    context and job details), then send it via the Email MCP server.
+
+    Requires: Email MCP server running on EMAIL_MCP_URL (default :9000).
+    """
+    if not resume.filename or not resume.filename.endswith(".pdf"):
+        raise HTTPException(400, "Only PDF resumes are supported")
+
+    suffix = f"_{uuid.uuid4().hex[:8]}.pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await resume.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        orch = get_orchestrator()
+        resume_profile = orch._resume_parser.parse(tmp_path)
+
+        # Locate the job in the vector store
+        resume_vec = orch._embedder.embed([resume_profile.embedding_text])[0]
+        results    = orch._vector_store.search_similar(resume_vec, top_k=100)
+        payload    = next((r for r in results if r.get("job_id") == job_id), None)
+        if not payload:
+            raise HTTPException(404, f"Job '{job_id}' not found in vector store")
+
+        from core.models import EmploymentType, SeniorityLevel, WorkType, safe_enum
+        job = JobPosting(
+            job_id=payload["job_id"],
+            company=payload.get("company"),
+            title=payload.get("title"),
+            location=payload.get("location"),
+            work_type=safe_enum(WorkType, payload.get("work_type")),
+            employment_type=safe_enum(EmploymentType, payload.get("employment_type")),
+            easy_apply=payload.get("easy_apply", False),
+            posted_raw_text=payload.get("posted_raw_text"),
+            posted_at=datetime.fromisoformat(payload["posted_at"]) if payload.get("posted_at") else None,
+            applicants_count=payload.get("applicants_count"),
+            applicants_approx=payload.get("applicants_approx", False),
+            skills=tuple(payload.get("skills", [])),
+            tools_technologies=tuple(payload.get("tools_technologies", [])),
+            required_experience=payload.get("required_experience"),
+            seniority_level=safe_enum(SeniorityLevel, payload.get("seniority_level")),
+            education_requirements=payload.get("education_requirements"),
+            key_responsibilities=tuple(payload.get("key_responsibilities", [])),
+            salary_range=payload.get("salary_range"),
+            benefits=tuple(payload.get("benefits", [])) if payload.get("benefits") else None,
+            remote_type=safe_enum(WorkType, payload.get("remote_type")),
+            description=payload.get("description", ""),
+            hr_email=payload.get("hr_email"),
+        )
+
+        if not job.hr_email:
+            raise HTTPException(
+                400,
+                f"Job '{job_id}' has no HR email — cannot send application email",
+            )
+
+        # Write the email using the orchestrator's LLM
+        subject, body = orch.write_email_for_job(job, resume_profile)
+
+        # Send via Email MCP server
+        email_client = EmailMCPClient()
+        result = email_client.send_email(
+            to_email=job.hr_email,
+            subject=subject,
+            body=body,
+            pdf_path=pdf_attachment_path,
+        )
+
+        return ApplyResponse(
+            success=result.get("success", False),
+            job_id=job_id,
+            hr_email=job.hr_email,
+            email_sent=result.get("success", False),
+            email_str={
+                "subject":    subject,
+                "body":       body,
+                "mcp_result": result,
+            },
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+# ── New: Bulk apply to all matched jobs with emails ───────────────────────────
+
+@app.post("/api/v1/bulk-apply", response_model=BulkApplyResponse)
+async def bulk_apply(
+    resume: UploadFile = File(...),
+    top_k: int = Form(default=50),
+    pdf_attachment_path: str = Form(default=""),
+    dry_run: bool = Form(default=False),
+) -> BulkApplyResponse:
+    """
+    Full pipeline: match resume → filter jobs with hr_email → write a
+    personalised email per job using the LLM → send all via Email MCP server.
+
+    Set dry_run=true to preview emails without actually sending them.
+    Requires: Email MCP server running on EMAIL_MCP_URL (default :9000).
+    """
+    if not resume.filename or not resume.filename.endswith(".pdf"):
+        raise HTTPException(400, "Only PDF resumes are supported")
+
+    suffix = f"_{uuid.uuid4().hex[:8]}.pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await resume.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        orch           = get_orchestrator()
+        resume_profile = orch._resume_parser.parse(tmp_path)
+        matches        = orch.match_resume(tmp_path, top_k=top_k)
+
+        email_jobs = [m for m in matches if m.job.hr_email]
+        if not email_jobs:
+            return BulkApplyResponse(
+                success=False,
+                total_attempted=0,
+                sent_count=0,
+                failed_count=0,
+                dry_run=dry_run,
+                results=[],
+            )
+
+        email_client = EmailMCPClient()
+
+        # ── Write all emails with LLM first ──────────────────────────────────
+        prepared: list[dict[str, Any]] = []
+        for m in email_jobs:
+            subject, body = orch.write_email_for_job(m.job, resume_profile)
+            prepared.append({
+                "job_id":   m.job.job_id,
+                "company":  m.job.company,
+                "title":    m.job.title,
+                "to_email": m.job.hr_email,
+                "subject":  subject,
+                "body":     body,
+            })
+
+        # ── dry_run: return preview without sending ───────────────────────────
+        if dry_run:
+            results = [
+                {
+                    "job_id":       p["job_id"],
+                    "company":      p["company"],
+                    "title":        p["title"],
+                    "hr_email":     p["to_email"],
+                    "subject":      p["subject"],
+                    "body_preview": p["body"][:120] + ("..." if len(p["body"]) > 120 else ""),
+                    "sent":         False,
+                    "error":        "",
+                    "dry_run":      True,
+                }
+                for p in prepared
+            ]
+            return BulkApplyResponse(
+                success=True,
+                total_attempted=len(results),
+                sent_count=len(results),   # all "sent" in dry-run sense
+                failed_count=0,
+                dry_run=True,
+                results=results,
+            )
+
+        # ── Real send: one SMTP connection via send_bulk_individual ───────────
+        mcp_payload = [
+            {"to_email": p["to_email"], "subject": p["subject"], "body": p["body"]}
+            for p in prepared
+        ]
+        mcp_result = email_client.send_bulk_individual(mcp_payload, pdf_attachment_path)
+
+        # Map per-email MCP results back to job metadata
+        mcp_results_by_email: dict[str, dict] = {
+            r["to_email"]: r
+            for r in mcp_result.get("results", [])
+        }
+
+        results = []
+        for p in prepared:
+            r = mcp_results_by_email.get(p["to_email"], {})
+            results.append({
+                "job_id":   p["job_id"],
+                "company":  p["company"],
+                "title":    p["title"],
+                "hr_email": p["to_email"],
+                "subject":  p["subject"],
+                "sent":     r.get("success", False),
+                "error":    r.get("error", ""),
+                "dry_run":  False,
+            })
+
+        sent_count = mcp_result.get("sent_count", 0)
+        return BulkApplyResponse(
+            success=True,
+            total_attempted=mcp_result.get("total_attempted", len(results)),
+            sent_count=sent_count,
+            failed_count=mcp_result.get("failed_count", len(results) - sent_count),
+            dry_run=False,
+            results=results,
+        )
+    finally:
+        tmp_path.unlink(missing_ok=True)
