@@ -1302,13 +1302,12 @@ function ScrapeSection({
   const [keywords, setKeywords] = useState(
     resume.target_roles?.[0] || resume.skills?.[0] || "Software Engineer"
   );
-  const [location, setLocation] = useState("Remote");
+  const [location, setLocation] = useState("");
+  const [country, setCountry] = useState("");
+  const [radiusKm, setRadiusKm] = useState("50");
   const [datePosted, setDatePosted] = useState("");
   const [jobType, setJobType] = useState("");
-  const [experienceLevel, setExperienceLevel] = useState("");
   const [workType, setWorkType] = useState("");
-  const [easyApply, setEasyApply] = useState(false);
-  const [sortBy, setSortBy] = useState("");
   const [isScraping, setIsScraping] = useState(false);
   const [events, setEvents] = useState<any[]>([]);
 
@@ -1322,10 +1321,11 @@ function ScrapeSection({
         max_pages: 1,
         date_posted: datePosted || undefined,
         job_type: jobType || undefined,
-        experience_level: experienceLevel || undefined,
         work_type: workType || undefined,
-        easy_apply: easyApply,
-        sort_by: sortBy || undefined,
+        radius_km: radiusKm ? Number(radiusKm) : undefined,
+        country: country || undefined,
+        language: "en",
+        max_jobs: 50,
       };
 
       const res = await fetch("http://localhost:8000/api/v1/scrape/stream", {
@@ -1378,6 +1378,12 @@ function ScrapeSection({
       const form = new FormData();
       form.append("resume", uploadedFile, uploadedFile.name);
       if (location) form.append("location", location);
+      if (country) form.append("country", country);
+      if (radiusKm) form.append("radius_km", radiusKm);
+      if (datePosted) form.append("date_posted", datePosted);
+      if (jobType) form.append("job_type", jobType);
+      if (workType) form.append("work_type", workType);
+      form.append("language", "en");
       form.append("max_roles", "3");
       form.append("max_pages", "1");
       form.append("max_jobs", "50");
@@ -1414,8 +1420,8 @@ function ScrapeSection({
           <Globe className="w-5 h-5 text-violet-600" />
         </div>
         <div>
-          <h3 className="text-lg font-bold text-slate-900">Scrape New Jobs</h3>
-          <p className="text-sm text-slate-500">Based on your resume, we recommend this role.</p>
+          <h3 className="text-lg font-bold text-slate-900">Discover Google Jobs</h3>
+          <p className="text-sm text-slate-500">Search one role or use your resume to discover several relevant roles.</p>
         </div>
       </div>
 
@@ -1431,18 +1437,13 @@ function ScrapeSection({
         </div>
         <div className="lg:col-span-2">
           <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Location</label>
-          <select
+          <input
+            type="text"
+            placeholder="e.g. Sydney, NSW"
             className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:border-violet-400 focus:ring-1 focus:ring-violet-400"
             value={location}
             onChange={(e) => setLocation(e.target.value)}
-          >
-            <option value="">Anywhere</option>
-            <option value="Remote">Remote</option>
-            <option value="San Francisco, CA">San Francisco, CA</option>
-            <option value="New York, NY">New York, NY</option>
-            <option value="London, UK">London, UK</option>
-            <option value="India">India</option>
-          </select>
+          />
         </div>
 
         <div>
@@ -1460,20 +1461,30 @@ function ScrapeSection({
           </select>
         </div>
         <div>
-          <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Experience Level</label>
+          <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Country</label>
           <select
             className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:border-violet-400"
-            value={experienceLevel}
-            onChange={(e) => setExperienceLevel(e.target.value)}
+            value={country}
+            onChange={(e) => setCountry(e.target.value)}
           >
-            <option value="">Any Level</option>
-            <option value="internship">Internship</option>
-            <option value="entry">Entry Level</option>
-            <option value="associate">Associate</option>
-            <option value="mid_senior">Mid-Senior Level</option>
-            <option value="director">Director</option>
-            <option value="executive">Executive</option>
+            <option value="">Default</option>
+            <option value="au">Australia</option>
+            <option value="in">India</option>
+            <option value="us">United States</option>
+            <option value="gb">United Kingdom</option>
+            <option value="ca">Canada</option>
           </select>
+        </div>
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Radius (km)</label>
+          <input
+            type="number"
+            min="1"
+            max="500"
+            className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:border-violet-400"
+            value={radiusKm}
+            onChange={(e) => setRadiusKm(e.target.value)}
+          />
         </div>
         <div>
           <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Job Type</label>
@@ -1487,9 +1498,7 @@ function ScrapeSection({
             <option value="part_time">Part-time</option>
             <option value="contract">Contract</option>
             <option value="temporary">Temporary</option>
-            <option value="volunteer">Volunteer</option>
             <option value="internship">Internship</option>
-            <option value="other">Other</option>
           </select>
         </div>
         <div>
@@ -1503,32 +1512,6 @@ function ScrapeSection({
             <option value="remote">Remote</option>
             <option value="on_site">On-site</option>
             <option value="hybrid">Hybrid</option>
-          </select>
-        </div>
-        
-        <div className="flex items-center gap-2 mt-4">
-          <input
-            type="checkbox"
-            id="easyApply"
-            checked={easyApply}
-            onChange={(e) => setEasyApply(e.target.checked)}
-            className="w-4 h-4 rounded text-violet-600 focus:ring-violet-500"
-          />
-          <label htmlFor="easyApply" className="text-sm font-medium text-slate-700">
-            Easy Apply (best effort)
-          </label>
-        </div>
-        
-        <div className="mt-2 lg:mt-0">
-          <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Sort By</label>
-          <select
-            className="w-full px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:border-violet-400"
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value)}
-          >
-            <option value="">None (Default)</option>
-            <option value="relevance">Relevance</option>
-            <option value="date">Date</option>
           </select>
         </div>
       </div>
