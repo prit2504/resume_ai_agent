@@ -13,6 +13,9 @@ from .embedder import UniversalEmbedder
 from .vector_store import QdrantVectorStore
 from .resume_parser import PDFResumeParser
 from .advisor import LLMResumeAdvisor
+from .contact import extract_job_contacts, select_outreach_email
+from .outreach import LLMOutreachDrafter
+from .email_sender import MCPEmailSender
 
 class JobMatcherOrchestrator:
     """Facade: Coordinates scraping, extraction, embedding, storage, and matching.
@@ -28,6 +31,8 @@ class JobMatcherOrchestrator:
         vector_store: QdrantVectorStore,
         resume_parser: PDFResumeParser,
         resume_advisor: LLMResumeAdvisor,
+        outreach_drafter: LLMOutreachDrafter | None = None,
+        email_sender: MCPEmailSender | None = None,
         llm_delay: float = 0.5,
     ) -> None:
         self._scraper = scraper
@@ -36,6 +41,8 @@ class JobMatcherOrchestrator:
         self._vector_store = vector_store
         self._resume_parser = resume_parser
         self._resume_advisor = resume_advisor
+        self._outreach_drafter = outreach_drafter
+        self._email_sender = email_sender
         self._llm_delay = llm_delay
 
     async def scrape_and_store(
@@ -49,21 +56,30 @@ class JobMatcherOrchestrator:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        radius_km: int | None = None,
+        country: str | None = None,
+        language: str | None = None,
+        uds: str | None = None,
+        max_jobs: int = 50,
+        search_queries: list[str] | None = None,
         dry_run: bool = False,
     ) -> list[JobPosting]:
         now = datetime.now(timezone.utc)
         print(f"🔍 Searching Google Jobs via SerpApi: keywords='{keywords}' location='{location}'")
 
-        job_ids = await self._scraper.search(
-            keywords=keywords,
+        queries = [q for q in (search_queries or [keywords]) if q and q.strip()]
+        job_ids = await self._scraper.search_many(
+            queries=queries,
             location=location,
             max_pages=max_pages,
             date_posted=date_posted,
             job_type=job_type,
-            experience_level=experience_level,
             work_type=work_type,
-            easy_apply=easy_apply,
-            sort_by=sort_by,
+            radius_km=radius_km,
+            country=country,
+            language=language,
+            uds=uds,
+            max_jobs=max_jobs,
         )
         print(f"📋 Found {len(job_ids)} jobs")
 
@@ -94,6 +110,8 @@ class JobMatcherOrchestrator:
                 (option.get("link") for option in apply_options if option.get("link")),
                 None,
             )
+            posting_text = (detail or {}).get("sections", {}).get("job_posting", "")
+            contacts = extract_job_contacts(posting_text)
 
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, jid))
             first_seen = self._vector_store.get_first_seen(point_id)
@@ -134,6 +152,9 @@ class JobMatcherOrchestrator:
                 source=raw_job.get("via") or "Google Jobs",
                 source_url=raw_job.get("share_link"),
                 apply_url=apply_url,
+                contact_emails=contacts["emails"],
+                contact_phones=contacts["phones"],
+                discovery_score=self._scraper.get_discovery_score(jid),
             )
             jobs.append(job)
 
@@ -170,6 +191,12 @@ class JobMatcherOrchestrator:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        radius_km: int | None = None,
+        country: str | None = None,
+        language: str | None = None,
+        uds: str | None = None,
+        max_jobs: int = 50,
+        search_queries: list[str] | None = None,
         concurrency: int = 1,
     ) -> AsyncGenerator[str, None]:
         """Concurrent pipeline yielding JSON progress updates."""
@@ -177,16 +204,19 @@ class JobMatcherOrchestrator:
         
         yield json.dumps({"step": "init", "message": f"Searching Google Jobs via SerpApi for '{keywords}' in '{location or 'Anywhere'}'..."})
 
-        job_ids = await self._scraper.search(
-            keywords=keywords,
+        queries = [q for q in (search_queries or [keywords]) if q and q.strip()]
+        job_ids = await self._scraper.search_many(
+            queries=queries,
             location=location,
             max_pages=max_pages,
             date_posted=date_posted,
             job_type=job_type,
-            experience_level=experience_level,
             work_type=work_type,
-            easy_apply=easy_apply,
-            sort_by=sort_by,
+            radius_km=radius_km,
+            country=country,
+            language=language,
+            uds=uds,
+            max_jobs=max_jobs,
         )
 
         total_jobs = len(job_ids)
@@ -223,6 +253,7 @@ class JobMatcherOrchestrator:
                         None,
                     )
                     posting_text = (detail or {}).get("sections", {}).get("job_posting", "")
+                    contacts = extract_job_contacts(posting_text)
                     
                     if not posting_text:
                         yield json.dumps({"step": "warn", "job_id": jid, "message": f"No posting text found for {jid}."})
@@ -264,6 +295,9 @@ class JobMatcherOrchestrator:
                         source=raw_job.get("via") or "Google Jobs",
                         source_url=raw_job.get("share_link"),
                         apply_url=apply_url,
+                contact_emails=contacts["emails"],
+                contact_phones=contacts["phones"],
+                discovery_score=self._scraper.get_discovery_score(jid),
                     )
                     
                     yield json.dumps({"step": "embedding", "job_id": jid, "message": f"Embedding and storing job {idx}/{total_jobs}..."})
@@ -301,6 +335,144 @@ class JobMatcherOrchestrator:
                 yield event
 
         yield json.dumps({"step": "done", "message": f"Successfully processed {completed_count} jobs.", "count": completed_count})
+
+    @staticmethod
+    def build_resume_search_queries(resume: Any, max_roles: int = 3) -> list[str]:
+        queries: list[str] = []
+        for role in resume.target_roles:
+            role = str(role).strip()
+            if role and role.lower() not in {q.lower() for q in queries}:
+                queries.append(role)
+            if len(queries) >= max_roles:
+                break
+        if not queries:
+            skills = [str(skill).strip() for skill in resume.skills[:3] if str(skill).strip()]
+            queries.append(" ".join(skills + ["jobs"]) if skills else "software engineer")
+        return queries[:max_roles]
+
+    async def scrape_resume_and_store_stream(
+        self,
+        resume_path: Path,
+        location: str | None = None,
+        max_roles: int = 3,
+        max_pages: int = 1,
+        date_posted: str | None = None,
+        job_type: str | None = None,
+        work_type: str | None = None,
+        radius_km: int | None = None,
+        country: str | None = None,
+        language: str | None = None,
+        max_jobs: int = 50,
+        concurrency: int = 1,
+    ) -> AsyncGenerator[str, None]:
+        resume = await asyncio.to_thread(self._resume_parser.parse, resume_path)
+        queries = self.build_resume_search_queries(resume, max_roles=max_roles)
+        yield json.dumps({"step": "resume_search", "message": f"Searching {len(queries)} resume-derived roles.", "queries": queries})
+        async for event in self.scrape_and_store_stream(
+            keywords=queries[0],
+            location=location,
+            max_pages=max_pages,
+            date_posted=date_posted,
+            job_type=job_type,
+            work_type=work_type,
+            radius_km=radius_km,
+            country=country,
+            language=language,
+            max_jobs=max_jobs,
+            search_queries=queries,
+            concurrency=concurrency,
+        ):
+            yield event
+
+    @staticmethod
+    def _job_from_payload(payload: dict[str, Any]) -> JobPosting:
+        return JobPosting(
+            job_id=payload.get("job_id", ""),
+            company=payload.get("company"),
+            title=payload.get("title"),
+            location=payload.get("location"),
+            work_type=safe_enum(WorkType, payload.get("work_type")),
+            employment_type=safe_enum(EmploymentType, payload.get("employment_type")),
+            easy_apply=payload.get("easy_apply", False),
+            posted_raw_text=payload.get("posted_raw_text"),
+            posted_at=datetime.fromisoformat(payload["posted_at"]) if payload.get("posted_at") else None,
+            applicants_count=payload.get("applicants_count"),
+            applicants_approx=payload.get("applicants_approx", False),
+            skills=tuple(payload.get("skills", [])),
+            tools_technologies=tuple(payload.get("tools_technologies", [])),
+            required_experience=payload.get("required_experience"),
+            seniority_level=safe_enum(SeniorityLevel, payload.get("seniority_level")),
+            education_requirements=payload.get("education_requirements"),
+            key_responsibilities=tuple(payload.get("key_responsibilities", [])),
+            salary_range=payload.get("salary_range"),
+            benefits=tuple(payload.get("benefits", [])) if payload.get("benefits") else None,
+            remote_type=safe_enum(WorkType, payload.get("remote_type")),
+            description=payload.get("description", ""),
+            source=payload.get("source"),
+            source_url=payload.get("source_url"),
+            apply_url=payload.get("apply_url"),
+            contact_emails=tuple(payload.get("contact_emails", [])),
+            contact_phones=tuple(payload.get("contact_phones", [])),
+            discovery_score=payload.get("discovery_score"),
+        )
+
+    def draft_outreach(self, resume_path: Path, job_id: str) -> dict[str, Any]:
+        if self._outreach_drafter is None:
+            raise RuntimeError("Outreach drafter is not configured")
+        payload = self._vector_store.get_job(job_id)
+        if not payload:
+            raise ValueError(f"Job {job_id} was not found in the vector store")
+        job = self._job_from_payload(payload)
+        recipient = select_outreach_email(job.contact_emails)
+        if not recipient:
+            return {
+                "available": False,
+                "job_id": job_id,
+                "contact_emails": list(job.contact_emails),
+                "contact_phones": list(job.contact_phones),
+                "message": "No email address was found in the stored job posting.",
+            }
+        resume = self._resume_parser.parse(resume_path)
+        generated = self._outreach_drafter.generate(resume, job, recipient)
+        return {
+            "available": True,
+            "job_id": job_id,
+            "job_title": job.title,
+            "company": job.company,
+            "recipient": recipient,
+            "contact_emails": list(job.contact_emails),
+            "contact_phones": list(job.contact_phones),
+            "subject": generated["subject"],
+            "body": generated["body"],
+        }
+
+    async def send_outreach(
+        self,
+        resume_path: Path,
+        attachment_name: str,
+        job_id: str,
+        recipient: str,
+        subject: str,
+        body: str,
+        approved: bool,
+    ) -> Any:
+        if not approved:
+            raise PermissionError("Human approval is required before sending")
+        if self._email_sender is None or not self._email_sender.configured:
+            raise RuntimeError("Email MCP server is not configured")
+        payload = self._vector_store.get_job(job_id)
+        if not payload:
+            raise ValueError(f"Job {job_id} was not found in the vector store")
+        allowed = {str(email).lower() for email in payload.get("contact_emails", [])}
+        if recipient.lower() not in allowed:
+            raise PermissionError("Recipient must be an email extracted from this job posting")
+        return await self._email_sender.send(
+            recipient=recipient,
+            subject=subject.strip(),
+            body=body.strip(),
+            attachment_name=attachment_name,
+            attachment_bytes=resume_path.read_bytes(),
+        )
 
     def match_resume(
         self,
@@ -344,6 +516,9 @@ class JobMatcherOrchestrator:
                 source=payload.get("source"),
                 source_url=payload.get("source_url"),
                 apply_url=payload.get("apply_url"),
+                contact_emails=tuple(payload.get("contact_emails", [])),
+                contact_phones=tuple(payload.get("contact_phones", [])),
+                discovery_score=payload.get("discovery_score"),
             )
             score = result.get("score", 0.0)
             matched.append(MatchedJob(job=job, similarity_score=score))
