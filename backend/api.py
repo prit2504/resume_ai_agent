@@ -72,7 +72,7 @@ def get_orchestrator() -> JobMatcherOrchestrator:
         llm_client, llm_connection = build_client(provider, "llm")
         print(f"LLM provider: {llm_connection.name} @ {llm_connection.base_url}")
 
-        job_source = os.environ.get("JOB_SOURCE", "serpapi").lower()
+        job_source = os.environ.get("JOB_SOURCE", "fixture").lower()
         if job_source == "fixture":
             scraper = LocalFixtureJobsScraper(
                 os.environ.get("LOCAL_JOBS_FIXTURE", "fixtures/jobs.json")
