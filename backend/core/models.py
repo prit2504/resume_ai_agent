@@ -86,6 +86,9 @@ class JobPosting:
     source: str | None = None
     source_url: str | None = None
     apply_url: str | None = None
+    contact_emails: tuple[str, ...] = field(default_factory=tuple)
+    contact_phones: tuple[str, ...] = field(default_factory=tuple)
+    discovery_score: float | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize to Qdrant-compatible payload dict."""
@@ -119,6 +122,9 @@ class JobPosting:
             "source": self.source,
             "source_url": self.source_url,
             "apply_url": self.apply_url,
+            "contact_emails": list(self.contact_emails),
+            "contact_phones": list(self.contact_phones),
+            "discovery_score": self.discovery_score,
         }
 
     @property
