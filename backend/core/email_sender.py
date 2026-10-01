@@ -6,7 +6,7 @@ from typing import Any
 
 
 class MCPEmailSender:
-    """Adapter around an existing email MCP server."""
+    """Adapter for the project's email MCP server."""
 
     def __init__(
         self,
@@ -52,6 +52,19 @@ class MCPEmailSender:
                 )
         return self._client
 
+    @staticmethod
+    def _normalize_result(result: Any) -> dict[str, Any]:
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            try:
+                parsed = json.loads(result)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        return {"success": True, "raw": result}
+
     async def send(
         self,
         recipient: str,
@@ -59,7 +72,7 @@ class MCPEmailSender:
         body: str,
         attachment_name: str,
         attachment_bytes: bytes,
-    ) -> Any:
+    ) -> dict[str, Any]:
         client = await self._get_client()
         tools = await client.get_tools()
         tool = next((item for item in tools if item.name == self._tool_name), None)
@@ -70,13 +83,13 @@ class MCPEmailSender:
             )
 
         payload = {
-            "to": recipient,
+            "to_email": recipient,
             "subject": subject,
             "body": body,
-            "attachments": [{
-                "filename": attachment_name,
-                "content_type": "application/pdf",
-                "content_base64": base64.b64encode(attachment_bytes).decode("ascii"),
-            }],
+            "pdf_base64": base64.b64encode(attachment_bytes).decode("ascii"),
+            "pdf_filename": attachment_name,
         }
-        return await tool.ainvoke(payload)
+        result = self._normalize_result(await tool.ainvoke(payload))
+        if not result.get("success", False):
+            raise RuntimeError(result.get("error") or "Email MCP send failed")
+        return result
