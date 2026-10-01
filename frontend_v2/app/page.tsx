@@ -58,6 +58,8 @@ import {
   Download,
   RefreshCw,
   Brain,
+  Mail,
+  Send,
 } from "lucide-react";
 import {
   BarChart,
@@ -96,6 +98,9 @@ interface JobPosting {
   salary_range: string | null;
   description: string;
   linkedin_url: string;
+  contact_emails?: string[];
+  contact_phones?: string[];
+  discovery_score?: number | null;
 }
 
 interface MatchedJob {
@@ -127,6 +132,20 @@ interface ResumeProfile {
   seniority_level: string | null;
   target_roles: string[];
   summary: string | null;
+}
+
+interface OutreachDraft {
+  available: boolean;
+  job_id: string;
+  job_title?: string | null;
+  company?: string | null;
+  recipient?: string;
+  contact_emails: string[];
+  contact_phones: string[];
+  subject?: string;
+  body?: string;
+  attachment_name?: string;
+  message?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -675,14 +694,19 @@ function JobCard({
   index,
   onGetAdvice,
   isAdvising,
+  onDraftOutreach,
+  isDrafting,
 }: {
   match: MatchedJob;
   index: number;
   onGetAdvice: (jobId: string) => void;
   isAdvising: boolean;
+  onDraftOutreach: (jobId: string) => void;
+  isDrafting: boolean;
 }) {
   const { job, similarity_score } = match;
   const [expanded, setExpanded] = useState(false);
+  const hasEmail = (job.contact_emails?.length || 0) > 0;
 
   const scoreColor =
     similarity_score >= 0.9
@@ -746,6 +770,12 @@ function JobCard({
               <Badge variant="info">
                 <DollarSign className="w-3 h-3 mr-1" />
                 {job.salary_range}
+              </Badge>
+            )}
+            {hasEmail && (
+              <Badge variant="success">
+                <Mail className="w-3 h-3 mr-1" />
+                Recruiter email found
               </Badge>
             )}
             <Badge variant="default">
@@ -850,9 +880,95 @@ function JobCard({
             >
               {isAdvising ? "Analyzing..." : "Get Advice"}
             </Button>
+            {hasEmail && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onDraftOutreach(job.job_id)}
+                disabled={isDrafting}
+                icon={<Mail className="w-4 h-4" />}
+              >
+                {isDrafting ? "Drafting..." : "Draft HR Email"}
+              </Button>
+            )}
           </div>
         </div>
       </Card>
+    </motion.div>
+  );
+}
+
+function OutreachPanel({
+  draft,
+  sending,
+  onClose,
+  onSend,
+}: {
+  draft: OutreachDraft;
+  sending: boolean;
+  onClose: () => void;
+  onSend: (draft: OutreachDraft) => void;
+}) {
+  const [recipient, setRecipient] = useState(draft.recipient || draft.contact_emails[0] || "");
+  const [subject, setSubject] = useState(draft.subject || "");
+  const [body, setBody] = useState(draft.body || "");
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: 300 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={{ opacity: 0, x: 300 }}
+      className="fixed inset-y-0 right-0 w-full max-w-2xl bg-white shadow-2xl border-l border-slate-200 z-50 overflow-y-auto"
+    >
+      <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">Review Outreach Email</h2>
+          <p className="text-sm text-slate-500">{draft.job_title} @ {draft.company}</p>
+        </div>
+        <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-xl">
+          <X className="w-5 h-5" />
+        </button>
+      </div>
+
+      <div className="p-6 space-y-5">
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-xl">
+          <p className="text-sm text-amber-800 font-medium">Human approval required</p>
+          <p className="text-xs text-amber-700 mt-1">Nothing is sent until you review and click Approve & Send.</p>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Recipient</label>
+          <select value={recipient} onChange={(e) => setRecipient(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-xl">
+            {draft.contact_emails.map((email) => <option key={email} value={email}>{email}</option>)}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Subject</label>
+          <input value={subject} onChange={(e) => setSubject(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-xl" />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-600 uppercase mb-2">Email body</label>
+          <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={12} className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm" />
+        </div>
+
+        <div className="flex items-center gap-2 text-sm text-slate-600">
+          <FileText className="w-4 h-4" />
+          Resume attachment: {draft.attachment_name || "resume.pdf"}
+        </div>
+
+        <div className="flex gap-3">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button
+            onClick={() => onSend({...draft, recipient, subject, body})}
+            disabled={sending || !recipient || !subject.trim() || !body.trim()}
+            icon={<Send className="w-4 h-4" />}
+          >
+            {sending ? "Sending..." : "Approve & Send"}
+          </Button>
+        </div>
+      </div>
     </motion.div>
   );
 }
@@ -1176,9 +1292,11 @@ function StatsOverview({ matches }: { matches: MatchedJob[] }) {
 
 function ScrapeSection({
   resume,
+  uploadedFile,
   onScrapeComplete,
 }: {
   resume: ResumeProfile;
+  uploadedFile: File | null;
   onScrapeComplete: () => void;
 }) {
   const [keywords, setKeywords] = useState(
@@ -1248,6 +1366,43 @@ function ScrapeSection({
       }
     } catch (err) {
       console.error(err);
+      setIsScraping(false);
+    }
+  };
+
+  const handleResumeSearch = async () => {
+    if (!uploadedFile) return;
+    setIsScraping(true);
+    setEvents([]);
+    try {
+      const form = new FormData();
+      form.append("resume", uploadedFile, uploadedFile.name);
+      if (location) form.append("location", location);
+      form.append("max_roles", "3");
+      form.append("max_pages", "1");
+      form.append("max_jobs", "50");
+
+      const res = await fetch("http://localhost:8000/api/v1/scrape/resume/stream", {
+        method: "POST",
+        body: form,
+      });
+      if (!res.body) throw new Error("No response body");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        for (const line of chunk.split("\n\n")) {
+          if (!line.startsWith("data: ")) continue;
+          const data = JSON.parse(line.slice(6));
+          setEvents((prev) => [...prev, data]);
+          if (data.step === "done") onScrapeComplete();
+        }
+      }
+    } catch (err) {
+      setEvents((prev) => [...prev, {step: "error", message: err instanceof Error ? err.message : "Resume search failed"}]);
+    } finally {
       setIsScraping(false);
     }
   };
@@ -1379,9 +1534,20 @@ function ScrapeSection({
       </div>
 
       {!isScraping && (
-        <Button onClick={handleStartScrape} className="w-full bg-violet-600 hover:bg-violet-700">
-          Start Live Scraping
-        </Button>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Button onClick={handleStartScrape} className="w-full bg-violet-600 hover:bg-violet-700">
+            Search This Role
+          </Button>
+          <Button
+            onClick={handleResumeSearch}
+            variant="secondary"
+            disabled={!uploadedFile}
+            className="w-full"
+            icon={<Sparkles className="w-4 h-4" />}
+          >
+            AI Multi-Role Search from Resume
+          </Button>
+        </div>
       )}
 
       {isScraping && (
@@ -1413,6 +1579,9 @@ export default function JobMatcherApp() {
   const [loading, setLoading] = useState(false);
   const [activeAdvice, setActiveAdvice] = useState<ResumeAdvice | null>(null);
   const [advisingJobId, setAdvisingJobId] = useState<string | null>(null);
+  const [draftingJobId, setDraftingJobId] = useState<string | null>(null);
+  const [activeOutreach, setActiveOutreach] = useState<OutreachDraft | null>(null);
+  const [sendingOutreach, setSendingOutreach] = useState(false);
   const [activeTab, setActiveTab] = useState<"matches" | "analytics">("matches");
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1490,10 +1659,54 @@ export default function JobMatcherApp() {
     [uploadedFile]
   );
 
+  const handleDraftOutreach = useCallback(async (jobId: string) => {
+    if (!uploadedFile) return;
+    setDraftingJobId(jobId);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("resume", uploadedFile, uploadedFile.name);
+      form.append("job_id", jobId);
+      const res = await fetch("/api/outreach/draft", {method: "POST", body: form});
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Failed to draft outreach email");
+      if (!data.draft.available) throw new Error(data.draft.message || "No email found in this job");
+      setActiveOutreach(data.draft);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to draft outreach email");
+    } finally {
+      setDraftingJobId(null);
+    }
+  }, [uploadedFile]);
+
+  const handleSendOutreach = useCallback(async (draft: OutreachDraft) => {
+    if (!uploadedFile || !draft.recipient || !draft.subject || !draft.body) return;
+    setSendingOutreach(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append("resume", uploadedFile, uploadedFile.name);
+      form.append("job_id", draft.job_id);
+      form.append("recipient", draft.recipient);
+      form.append("subject", draft.subject);
+      form.append("body", draft.body);
+      form.append("approved", "true");
+      const res = await fetch("/api/outreach/send", {method: "POST", body: form});
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Failed to send outreach email");
+      setActiveOutreach(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send outreach email");
+    } finally {
+      setSendingOutreach(false);
+    }
+  }, [uploadedFile]);
+
   const handleReset = useCallback(() => {
     setResume(null);
     setMatches([]);
     setActiveAdvice(null);
+    setActiveOutreach(null);
     setUploadedFile(null);
     setError(null);
     setActiveTab("matches");
@@ -1532,7 +1745,8 @@ export default function JobMatcherApp() {
         {resume && !loading && (
           <div className="px-4 sm:px-6 lg:px-8">
             <ScrapeSection 
-              resume={resume} 
+              resume={resume}
+              uploadedFile={uploadedFile}
               onScrapeComplete={() => {
                 // We could automatically re-run matching here by re-uploading the file,
                 // but for now we just show it's done. 
@@ -1611,6 +1825,8 @@ export default function JobMatcherApp() {
                       index={i}
                       onGetAdvice={handleGetAdvice}
                       isAdvising={advisingJobId === match.job.job_id}
+                      onDraftOutreach={handleDraftOutreach}
+                      isDrafting={draftingJobId === match.job.job_id}
                     />
                   ))}
                 </div>
@@ -1669,6 +1885,26 @@ export default function JobMatcherApp() {
           </section>
         )}
       </main>
+
+      <AnimatePresence>
+        {activeOutreach && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40"
+              onClick={() => setActiveOutreach(null)}
+            />
+            <OutreachPanel
+              draft={activeOutreach}
+              sending={sendingOutreach}
+              onClose={() => setActiveOutreach(null)}
+              onSend={handleSendOutreach}
+            />
+          </>
+        )}
+      </AnimatePresence>
 
       {/* Advice Panel Overlay */}
       <AnimatePresence>
