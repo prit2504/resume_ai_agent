@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core.models import JobPosting
-from core.scraper import LinkedInMCPScraper
+from core.scraper import SerpApiGoogleJobsScraper
 from core.extractor import LLMJobExtractor
 from core.embedder import UniversalEmbedder
 from core.vector_store import QdrantVectorStore
@@ -38,7 +38,7 @@ from qdrant_client import QdrantClient
 
 app = FastAPI(
     title="Job Matcher API",
-    description="LinkedIn job scraping, resume matching, and AI resume advice",
+    description="Google Jobs search via SerpApi, resume matching, and AI resume advice",
     version="1.0.0",
 )
 
@@ -98,8 +98,13 @@ def get_orchestrator() -> JobMatcherOrchestrator:
             api_key=embed_api_key,
         )
 
-        scraper = LinkedInMCPScraper(
-            mcp_url=os.environ.get("MCP_LINKEDIN_URL", "http://localhost:8080/mcp"),
+        scraper = SerpApiGoogleJobsScraper(
+            api_key=os.environ.get("SERPAPI_API_KEY", ""),
+            google_domain=os.environ.get("SERPAPI_GOOGLE_DOMAIN", "google.com"),
+            gl=os.environ.get("SERPAPI_GL") or None,
+            hl=os.environ.get("SERPAPI_HL", "en") or None,
+            timeout=float(os.environ.get("SERPAPI_TIMEOUT_SECONDS", "30")),
+            no_cache=os.environ.get("SERPAPI_NO_CACHE", "false").lower() == "true",
         )
         
         # Backward compatibility fallback
@@ -122,7 +127,7 @@ def get_orchestrator() -> JobMatcherOrchestrator:
         )
         vector_store = QdrantVectorStore(
             qdrant,
-            os.environ.get("QDRANT_COLLECTION", "linkedin_jobs"),
+            os.environ.get("QDRANT_COLLECTION", "google_jobs"),
         )
         resume_parser = PDFResumeParser(
             llm_client=llm_client,
@@ -177,7 +182,7 @@ class AdviceResponse(BaseModel):
 
 @app.post("/api/v1/scrape", response_model=dict)
 async def scrape_jobs(req: ScrapeRequest) -> dict[str, Any]:
-    """Trigger a LinkedIn job scrape and store results in Qdrant."""
+    """Search Google Jobs through SerpApi and store results in Qdrant."""
     orch = get_orchestrator()
     jobs = await orch.scrape_and_store(
         keywords=req.keywords,
@@ -330,6 +335,9 @@ async def get_advice(
             benefits=tuple(target_payload.get("benefits", [])) if target_payload.get("benefits") else None,
             remote_type=safe_enum(WorkType, target_payload.get("remote_type")),
             description=target_payload.get("description", ""),
+            source=target_payload.get("source"),
+            source_url=target_payload.get("source_url"),
+            apply_url=target_payload.get("apply_url"),
 
         )
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from .models import EmploymentType, JobPosting, MatchedJob, ResumeAdvice, SeniorityLevel, WorkType, safe_enum
-from .scraper import LinkedInMCPScraper
+from .scraper import SerpApiGoogleJobsScraper
 from .extractor import LLMJobExtractor
 from .embedder import UniversalEmbedder
 from .vector_store import QdrantVectorStore
@@ -22,7 +22,7 @@ class JobMatcherOrchestrator:
 
     def __init__(
         self,
-        scraper: LinkedInMCPScraper,
+        scraper: SerpApiGoogleJobsScraper,
         extractor: LLMJobExtractor,
         embedder: UniversalEmbedder,
         vector_store: QdrantVectorStore,
@@ -52,7 +52,7 @@ class JobMatcherOrchestrator:
         dry_run: bool = False,
     ) -> list[JobPosting]:
         now = datetime.now(timezone.utc)
-        print(f"🔍 Searching LinkedIn: keywords='{keywords}' location='{location}'")
+        print(f"🔍 Searching Google Jobs via SerpApi: keywords='{keywords}' location='{location}'")
 
         job_ids = await self._scraper.search(
             keywords=keywords,
@@ -87,6 +87,14 @@ class JobMatcherOrchestrator:
 
         jobs: list[JobPosting] = []
         for jid, fields in fields_by_id.items():
+            detail = details.get(jid) or {}
+            raw_job = detail.get("serpapi_job", {}) or {}
+            apply_options = raw_job.get("apply_options") or []
+            apply_url = next(
+                (option.get("link") for option in apply_options if option.get("link")),
+                None,
+            )
+
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, jid))
             first_seen = self._vector_store.get_first_seen(point_id)
             
@@ -98,13 +106,13 @@ class JobMatcherOrchestrator:
 
             job = JobPosting(
                 job_id=jid,
-                company=fields.get("company"),
-                title=fields.get("title"),
-                location=fields.get("location"),
+                company=raw_job.get("company_name") or fields.get("company"),
+                title=raw_job.get("title") or fields.get("title"),
+                location=raw_job.get("location") or fields.get("location"),
                 work_type=safe_enum(WorkType, fields.get("work_type")),
                 employment_type=safe_enum(EmploymentType, fields.get("employment_type")),
                 easy_apply=bool(fields.get("easy_apply", False)),
-                posted_raw_text=fields.get("posted_raw_text"),
+                posted_raw_text=(raw_job.get("detected_extensions") or {}).get("posted_at") or fields.get("posted_raw_text"),
                 posted_at=None, # Simplifying posted_at for modularity
                 applicants_count=fields.get("applicants_count"),
                 applicants_approx=bool(fields.get("applicants_approx", False)),
@@ -117,12 +125,15 @@ class JobMatcherOrchestrator:
                 salary_range=fields.get("salary_range"),
                 benefits=_to_tuple(fields.get("benefits")) if fields.get("benefits") else None,
                 remote_type=safe_enum(WorkType, fields.get("remote_type")),
-                description=fields.get("description", ""),
+                description=raw_job.get("description") or fields.get("description", ""),
                 search_keywords=keywords,
                 search_location=location,
                 first_seen_at=first_seen or now,
                 last_seen_at=now,
                 scraped_at=now,
+                source=raw_job.get("via") or "Google Jobs",
+                source_url=raw_job.get("share_link"),
+                apply_url=apply_url,
             )
             jobs.append(job)
 
@@ -164,7 +175,7 @@ class JobMatcherOrchestrator:
         """Concurrent pipeline yielding JSON progress updates."""
         now = datetime.now(timezone.utc)
         
-        yield json.dumps({"step": "init", "message": f"Searching LinkedIn for '{keywords}' in '{location or 'Anywhere'}'..."})
+        yield json.dumps({"step": "init", "message": f"Searching Google Jobs via SerpApi for '{keywords}' in '{location or 'Anywhere'}'..."})
 
         job_ids = await self._scraper.search(
             keywords=keywords,
@@ -205,6 +216,12 @@ class JobMatcherOrchestrator:
                 try:
                     yield json.dumps({"step": "fetching", "job_id": jid, "message": f"Fetching details for job {idx}/{total_jobs}..."})
                     detail = await self._scraper.fetch_details(jid)
+                    raw_job = (detail or {}).get("serpapi_job", {}) or {}
+                    apply_options = raw_job.get("apply_options") or []
+                    apply_url = next(
+                        (option.get("link") for option in apply_options if option.get("link")),
+                        None,
+                    )
                     posting_text = (detail or {}).get("sections", {}).get("job_posting", "")
                     
                     if not posting_text:
@@ -219,13 +236,13 @@ class JobMatcherOrchestrator:
                     
                     job = JobPosting(
                         job_id=jid,
-                        company=fields.get("company"),
-                        title=fields.get("title"),
-                        location=fields.get("location"),
+                        company=raw_job.get("company_name") or fields.get("company"),
+                        title=raw_job.get("title") or fields.get("title"),
+                        location=raw_job.get("location") or fields.get("location"),
                         work_type=safe_enum(WorkType, fields.get("work_type")),
                         employment_type=safe_enum(EmploymentType, fields.get("employment_type")),
                         easy_apply=bool(fields.get("easy_apply", False)),
-                        posted_raw_text=fields.get("posted_raw_text"),
+                        posted_raw_text=(raw_job.get("detected_extensions") or {}).get("posted_at") or fields.get("posted_raw_text"),
                         posted_at=None,
                         applicants_count=fields.get("applicants_count"),
                         applicants_approx=bool(fields.get("applicants_approx", False)),
@@ -238,12 +255,15 @@ class JobMatcherOrchestrator:
                         salary_range=fields.get("salary_range"),
                         benefits=_to_tuple(fields.get("benefits")) if fields.get("benefits") else None,
                         remote_type=safe_enum(WorkType, fields.get("remote_type")),
-                        description=fields.get("description", ""),
+                        description=raw_job.get("description") or fields.get("description", ""),
                         search_keywords=keywords,
                         search_location=location,
                         first_seen_at=first_seen or now,
                         last_seen_at=now,
                         scraped_at=now,
+                        source=raw_job.get("via") or "Google Jobs",
+                        source_url=raw_job.get("share_link"),
+                        apply_url=apply_url,
                     )
                     
                     yield json.dumps({"step": "embedding", "job_id": jid, "message": f"Embedding and storing job {idx}/{total_jobs}..."})
@@ -321,6 +341,9 @@ class JobMatcherOrchestrator:
                 benefits=tuple(payload.get("benefits", [])) if payload.get("benefits") else None,
                 remote_type=safe_enum(WorkType, payload.get("remote_type")),
                 description=payload.get("description", ""),
+                source=payload.get("source"),
+                source_url=payload.get("source_url"),
+                apply_url=payload.get("apply_url"),
             )
             score = result.get("score", 0.0)
             matched.append(MatchedJob(job=job, similarity_score=score))

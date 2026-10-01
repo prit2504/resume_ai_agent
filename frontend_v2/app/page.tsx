@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * LinkedIn Job Matcher — Next.js Frontend
+ * Resume AI Agent — Next.js Frontend
  * ========================================
  * Interactive dashboard for resume upload, job matching,
  * and AI-powered resume improvement suggestions.
@@ -828,10 +828,10 @@ function JobCard({
               href={job.linkedin_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#0a66c2] hover:bg-[#084e96] text-white rounded-xl text-sm font-medium transition-colors"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-violet-600 hover:bg-violet-700 text-white rounded-xl text-sm font-medium transition-colors"
             >
               <ExternalLink className="w-4 h-4" />
-              Apply on LinkedIn
+              View / Apply
             </a>
             <Button
               variant="outline"
@@ -1360,7 +1360,7 @@ function ScrapeSection({
             className="w-4 h-4 rounded text-violet-600 focus:ring-violet-500"
           />
           <label htmlFor="easyApply" className="text-sm font-medium text-slate-700">
-            Easy Apply Only
+            Easy Apply (best effort)
           </label>
         </div>
         
@@ -1388,7 +1388,7 @@ function ScrapeSection({
         <div className="bg-slate-900 rounded-xl p-4 mt-4 h-64 overflow-y-auto font-mono text-xs text-emerald-400">
           <div className="flex items-center gap-2 mb-2 pb-2 border-b border-slate-800">
             <RefreshCw className="w-4 h-4 animate-spin" />
-            <span>Connecting to MCP and Scraping...</span>
+            <span>Searching Google Jobs via SerpApi...</span>
           </div>
           {events.map((ev, i) => (
             <div key={i} className="mb-1 flex gap-2">

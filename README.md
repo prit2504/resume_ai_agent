@@ -1,103 +1,97 @@
-# LinkedIn Job Matcher — AI-Powered Career Assistant
+# Resume AI Agent — Google Jobs Matcher
 
 ## Overview
 
-A fully modular, AI-native system that:
-1. **Scrapes** LinkedIn jobs via the [LinkedIn MCP Server](https://github.com/stickerdaniel/linkedin-mcp-server).
-2. **Streams** live scraping progress directly to the frontend using Server-Sent Events (SSE).
-3. **Extracts** structured fields concurrently using a lightweight local/cloud LLM (`EXTRACTOR_MODEL`).
-4. **Embeds** job descriptions into a vector space.
-5. **Stores** everything in Qdrant with idempotent upserts.
-6. **Parses** user resumes (PDF) and extracts structured profiles.
-7. **Matches** resumes to jobs via semantic similarity search.
-8. **Advises** users on resume improvements using a heavy reasoning LLM (`ADVISOR_MODEL`).
-9. **Serves** everything through a beautiful Next.js dashboard.
+A modular AI career assistant that searches Google Jobs through SerpApi, streams live processing progress, normalizes listings with an LLM, embeds them into Qdrant, matches them against PDF resumes, and generates role-specific resume advice.
 
 ## Architecture
 
-The project has transitioned into a highly modular, multi-provider architecture designed for maximum performance through asyncio concurrency and streaming.
+~~~text
+Next.js frontend
+      |
+      | REST + SSE
+      v
+FastAPI / JobMatcherOrchestrator
+      |
+      +--> SerpApi Google Jobs --> descriptions + application links
+      +--> LLMJobExtractor
+      +--> UniversalEmbedder
+      +--> Qdrant
+      +--> PDFResumeParser
+      +--> LLMResumeAdvisor
+~~~
 
-```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              NEXT.JS FRONTEND                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
-│  │ Resume       │  │ Job Match    │  │ Live Scrape  │  │ AI Advisor       │ │
-│  │ Upload       │  │ Cards        │  │ Loader (SSE) │  │ Slide-over       │ │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────────┘ │
-└──────────────────────────────┬─────────────▲────────────────────────────────┘
-                     HTTP/REST │             │ Server-Sent Events (Live)
-┌──────────────────────────────▼─────────────┴────────────────────────────────┐
-│                           FASTAPI MICROSERVICE                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                     JobMatcherOrchestrator                           │   │
-│  │                                                                      │   │
-│  │  ┌─────────────┐  ┌──────────────┐ ┌─────────────┐  ┌───────────┐    │   │
-│  │  │ Scraper     │  │ Extractor    │ │ Embedder    │  │VectorStore│    │   │
-│  │  │ (stdio MCP) │  │ (Gemma 4B)   │ │ (Universal) │  │ Qdrant    │    │   │
-│  │  └──────┬──────┘  └──────┬───────┘ └──────┬──────┘  └───────────┘    │   │
-│  │         └────────────────┴───────┬────────┘                          │   │
-│  │                           asyncio.gather (x3 Concurrency)            │   │
-│  │                                                                      │   │
-│  │  ┌─────────────┐  ┌──────────────┐                                   │   │
-│  │  │ResumeParser │  │ResumeAdvisor │                                   │   │
-│  │  │ PDF + LLM   │  │ (Gemma 12B)  │                                   │   │
-│  │  └─────────────┘  └──────────────┘                                   │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────┬──────────────────────────────────────────────┘
-                  MCP Protocol │ (stdio)
-┌──────────────────────────────▼──────────────────────────────────────────────┐
-│                         EXTERNAL SERVICES                                   │
-│  ┌─────────────────┐ ┌───────────────┐ ┌─────────────┐ ┌────────────────┐   │
-│  │ LinkedIn        │ │ Cloud LLMs    │ │ Qdrant      │ │ Local LLMs     │   │
-│  │ uvx mcp-server  │ │ OpenAI/Gemini │ │ Vector DB   │ │ Ollama/LMStudio│   │
-│  └─────────────────┘ └───────────────┘ └─────────────┘ └────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+The SerpApi adapter preserves the existing scraper contract, so the extraction -> embedding -> storage -> matching -> advice workflow remains intact.
 
-## File Structure
+## Setup
 
-```text
-job-matcher/
-├── backend/
-│   ├── core/                     # Modular backend services
-│   │   ├── models.py             # Data classes and Enums
-│   │   ├── scraper.py            # LinkedIn MCP Scraper (stdio)
-│   │   ├── extractor.py          # LLM JSON Extraction
-│   │   ├── embedder.py           # Universal Embedder
-│   │   ├── vector_store.py       # Qdrant Vector Store
-│   │   ├── resume_parser.py      # PDF Resume Parser (Date aware)
-│   │   ├── advisor.py            # AI Resume Advisor
-│   │   └── orchestrator.py       # Orchestrator (SSE & Async Queues)
-│   ├── api.py                    # FastAPI REST & SSE endpoints
-│   ├── .env                      # Multi-provider LLM Configuration
-│   └── requirements.txt          # Python deps
-│
-├── frontend_v2/
-│   ├── app/                      # Next.js App Router
-│   │   ├── api/                  # API routes (BFF)
-│   │   ├── globals.css           # Tailwind CSS
-│   │   └── page.tsx              # Main dashboard with Live UI
-│   └── package.json
-│
-├── info.md                       # Complete Project Documentation
-└── README.md
-```
+1. Start Qdrant:
 
-## Setup & Quick Start
+~~~bash
+docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
+~~~
 
-For a detailed setup guide, including all configuration variables and workflows, please read the [info.md](./info.md) file in the root of this project.
+2. Configure the backend:
 
-### Briefly:
-1. **Database:** Start Qdrant (`docker run -p 6333:6333 qdrant/qdrant`)
-2. **Environment:** Copy `backend/.env.example` to `backend/.env` and configure your API keys (OpenAI, Gemini, HuggingFace) or leave it pointing to local Ollama.
-3. **Backend:** Start FastAPI (`cd backend && uvicorn api:app --port 8000`). *Note: FastAPI will automatically spawn the LinkedIn MCP server using `uvx`.*
-4. **Frontend:** Start Next.js (`cd frontend_v2 && npm run dev`)
+~~~bash
+cd backend
+cp .env.example .env
+~~~
 
-## Acknowledgments & Open Source Contributions
+Set at minimum:
 
-This project relies on the **Model Context Protocol (MCP)** to interact securely and safely with LinkedIn, specifically using the excellent [LinkedIn MCP Server](https://github.com/stickerdaniel/linkedin-mcp-server) created by [stickerdaniel](https://github.com/stickerdaniel). 
+~~~dotenv
+SERPAPI_API_KEY=your_serpapi_api_key_here
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION=google_jobs
+~~~
 
-I plan to contribute to this open-source MCP server to continue improving its capabilities for the community!
+Also configure the LLM and embedding provider variables in `.env`.
+
+3. Install and start the backend:
+
+~~~bash
+cd backend
+python -m venv venv
+pip install -r requirements.txt
+uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+~~~
+
+4. Start the frontend:
+
+~~~bash
+cd frontend_v2
+npm install
+npm run dev
+~~~
+
+Open http://localhost:3000.
+
+## Google Jobs Search
+
+The backend sends `engine=google_jobs` to SerpApi. Pagination follows `serpapi_pagination.next_page_token`, with up to 10 results returned per page.
+
+The existing UI filter schema is preserved. Date, job type, seniority, work type, Easy Apply, and date sorting are translated into best-effort query terms where Google Jobs has no stable direct filter equivalent.
+
+Application links come from SerpApi `apply_options` when available, with the Google Jobs `share_link` as fallback.
+
+## Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `SERPAPI_API_KEY` | Required SerpApi key |
+| `SERPAPI_GOOGLE_DOMAIN` | Google domain, default `google.com` |
+| `SERPAPI_GL` | Optional country code |
+| `SERPAPI_HL` | Language, default `en` |
+| `SERPAPI_TIMEOUT_SECONDS` | HTTP timeout, default 30 |
+| `SERPAPI_NO_CACHE` | Set `true` to bypass SerpApi cache |
+| `QDRANT_COLLECTION` | Vector collection, default `google_jobs` |
+
+## Notes
+
+- LinkedIn cookies, MCP login, and the LinkedIn MCP server are no longer required.
+- The legacy `linkedin_url` response field is retained as a frontend compatibility alias and resolves to the best available application/source URL.
+- SerpApi usage is subject to your SerpApi account limits and plan.
 
 ## License
 

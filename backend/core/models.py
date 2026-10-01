@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
+from urllib.parse import quote_plus
 
 class WorkType(Enum):
     """Work arrangement classification."""
@@ -82,6 +83,9 @@ class JobPosting:
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
     scraped_at: datetime | None = None
+    source: str | None = None
+    source_url: str | None = None
+    apply_url: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         """Serialize to Qdrant-compatible payload dict."""
@@ -112,12 +116,30 @@ class JobPosting:
             "first_seen_at": self.first_seen_at.isoformat() if self.first_seen_at else None,
             "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
             "scraped_at": self.scraped_at.isoformat() if self.scraped_at else None,
+            "source": self.source,
+            "source_url": self.source_url,
+            "apply_url": self.apply_url,
         }
 
     @property
+    def application_url(self) -> str:
+        """Best available job/application URL regardless of source."""
+        if self.apply_url:
+            return self.apply_url
+        if self.source_url:
+            return self.source_url
+        if self.job_id.isdigit():
+            return f"https://www.linkedin.com/jobs/view/{self.job_id}"
+
+        query = quote_plus(
+            " ".join(part for part in (self.title, self.company, "jobs") if part)
+        )
+        return f"https://www.google.com/search?q={query}"
+
+    @property
     def linkedin_url(self) -> str:
-        """Generate the direct LinkedIn job application URL."""
-        return f"https://www.linkedin.com/jobs/view/{self.job_id}"
+        """Backward-compatible alias used by the existing frontend."""
+        return self.application_url
 
     @property
     def embedding_text(self) -> str:
