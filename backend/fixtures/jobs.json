@@ -1,0 +1,41 @@
+[
+  {
+    "job_id": "fixture-ai-engineer-001",
+    "title": "AI/ML Engineer",
+    "company_name": "Demo AI Labs",
+    "location": "Remote",
+    "via": "Local Fixture",
+    "description": "We are looking for an AI/ML Engineer with Python, Retrieval-Augmented Generation, LLM application development, semantic search, vector databases, Docker, and API development experience. You will build production AI assistants and retrieval pipelines. For application questions, contact recruitment@example.com.",
+    "detected_extensions": {
+      "posted_at": "1 day ago",
+      "work_from_home": true,
+      "schedule_type": "Full-time"
+    },
+    "apply_options": [
+      {
+        "title": "Demo careers",
+        "link": "https://example.com/jobs/ai-ml-engineer"
+      }
+    ],
+    "share_link": "https://example.com/jobs/ai-ml-engineer"
+  },
+  {
+    "job_id": "fixture-llm-engineer-002",
+    "title": "LLM Engineer",
+    "company_name": "Example Intelligence",
+    "location": "Vadodara, Gujarat",
+    "via": "Local Fixture",
+    "description": "Build LLM workflows, RAG systems, prompt pipelines, evaluation tooling, and backend APIs using Python, FastAPI, Qdrant, Docker, and open-source language models. Please send technical questions to talent@example.org.",
+    "detected_extensions": {
+      "posted_at": "3 days ago",
+      "schedule_type": "Full-time"
+    },
+    "apply_options": [
+      {
+        "title": "Example careers",
+        "link": "https://example.org/careers/llm-engineer"
+      }
+    ],
+    "share_link": "https://example.org/careers/llm-engineer"
+  }
+]
