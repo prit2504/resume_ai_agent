@@ -96,3 +96,42 @@ Application links come from SerpApi `apply_options` when available, with the Goo
 ## License
 
 MIT License
+
+
+## Recruiter Outreach with Human Approval
+
+If a job description contains a literal email address or phone number, the backend stores that contact with the job. Contact extraction is deterministic from the source posting; the LLM does not invent recruiter details.
+
+For a job with an email address:
+1. Click **Draft HR Email**.
+2. The LLM drafts a truthful email from the job + uploaded resume.
+3. Review or edit recipient, subject, and body.
+4. The PDF resume is attached.
+5. Only **Approve & Send** calls the configured email MCP server.
+
+The send endpoint rejects recipients that were not extracted from the same stored job.
+
+### Email MCP configuration
+
+~~~dotenv
+EMAIL_MCP_TRANSPORT=streamable_http
+EMAIL_MCP_URL=http://localhost:8081/mcp
+EMAIL_MCP_TOOL_NAME=send_email
+~~~
+
+For stdio:
+
+~~~dotenv
+EMAIL_MCP_TRANSPORT=stdio
+EMAIL_MCP_COMMAND=python
+EMAIL_MCP_ARGS_JSON=["path/to/email_mcp_server.py"]
+EMAIL_MCP_TOOL_NAME=send_email
+~~~
+
+The adapter currently expects the send tool to accept `to`, `subject`, `body`, and an `attachments` array with `filename`, `content_type`, and `content_base64`.
+
+## Search Improvements in this Branch
+
+- SerpApi-native country (`gl`), language (`hl`), radius (`lrad`) and optional `uds` support.
+- Duplicate-job detection and lightweight relevance/recency ranking before LLM extraction and Qdrant storage.
+- Resume-driven multi-role discovery that searches up to three parsed target roles and merges/deduplicates results.
