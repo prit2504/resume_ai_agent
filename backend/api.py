@@ -9,6 +9,7 @@ Run: uvicorn api:app --host 0.0.0.0 --port 8000 --reload
 from __future__ import annotations
 
 import os
+import asyncio
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -31,6 +32,8 @@ from core.embedder import UniversalEmbedder
 from core.vector_store import QdrantVectorStore
 from core.resume_parser import PDFResumeParser
 from core.advisor import LLMResumeAdvisor
+from core.outreach import LLMOutreachDrafter
+from core.email_sender import MCPEmailSender
 from core.orchestrator import JobMatcherOrchestrator
 from openai import OpenAI
 from qdrant_client import QdrantClient
@@ -137,6 +140,14 @@ def get_orchestrator() -> JobMatcherOrchestrator:
             llm_client=llm_client,
             llm_model=advisor_model,
         )
+        outreach_drafter = LLMOutreachDrafter(llm_client=llm_client, llm_model=advisor_model)
+        email_sender = MCPEmailSender(
+            transport=os.environ.get("EMAIL_MCP_TRANSPORT", "streamable_http"),
+            url=os.environ.get("EMAIL_MCP_URL") or None,
+            command=os.environ.get("EMAIL_MCP_COMMAND") or None,
+            args_json=os.environ.get("EMAIL_MCP_ARGS_JSON", "[]"),
+            tool_name=os.environ.get("EMAIL_MCP_TOOL_NAME", "send_email"),
+        )
 
         _orch = JobMatcherOrchestrator(
             scraper=scraper,
@@ -145,6 +156,8 @@ def get_orchestrator() -> JobMatcherOrchestrator:
             vector_store=vector_store,
             resume_parser=resume_parser,
             resume_advisor=resume_advisor,
+            outreach_drafter=outreach_drafter,
+            email_sender=email_sender,
         )
     return _orch
 
@@ -155,13 +168,15 @@ def get_orchestrator() -> JobMatcherOrchestrator:
 class ScrapeRequest(BaseModel):
     keywords: str
     location: str | None = None
-    max_pages: int = Field(default=3, ge=1, le=10)
+    max_pages: int = Field(default=1, ge=1, le=10)
     date_posted: str | None = None
     job_type: str | None = None
-    experience_level: str | None = None
     work_type: str | None = None
-    easy_apply: bool = False
-    sort_by: str | None = None
+    radius_km: int | None = Field(default=None, ge=1, le=500)
+    country: str | None = None
+    language: str | None = "en"
+    uds: str | None = None
+    max_jobs: int = Field(default=50, ge=1, le=200)
 
 
 class MatchResponse(BaseModel):
@@ -190,10 +205,12 @@ async def scrape_jobs(req: ScrapeRequest) -> dict[str, Any]:
         max_pages=req.max_pages,
         date_posted=req.date_posted,
         job_type=req.job_type,
-        experience_level=req.experience_level,
         work_type=req.work_type,
-        easy_apply=req.easy_apply,
-        sort_by=req.sort_by,
+        radius_km=req.radius_km,
+        country=req.country,
+        language=req.language,
+        uds=req.uds,
+        max_jobs=req.max_jobs,
     )
     return {
         "success": True,
@@ -215,15 +232,131 @@ async def scrape_jobs_stream(req: ScrapeRequest):
             max_pages=req.max_pages,
             date_posted=req.date_posted,
             job_type=req.job_type,
-            experience_level=req.experience_level,
             work_type=req.work_type,
-            easy_apply=req.easy_apply,
-            sort_by=req.sort_by,
+            radius_km=req.radius_km,
+            country=req.country,
+            language=req.language,
+            uds=req.uds,
+            max_jobs=req.max_jobs,
             concurrency=concurrency,
         ):
             yield f"data: {event}\n\n"
             
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/v1/scrape/resume/stream")
+async def scrape_jobs_from_resume_stream(
+    resume: UploadFile = File(...),
+    location: str | None = Form(default=None),
+    max_roles: int = Form(default=3),
+    max_pages: int = Form(default=1),
+    date_posted: str | None = Form(default=None),
+    job_type: str | None = Form(default=None),
+    work_type: str | None = Form(default=None),
+    radius_km: int | None = Form(default=None),
+    country: str | None = Form(default=None),
+    language: str | None = Form(default="en"),
+    max_jobs: int = Form(default=50),
+):
+    if not resume.filename or not resume.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF resumes are supported")
+
+    suffix = f"_{uuid.uuid4().hex[:8]}.pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await resume.read())
+        tmp_path = Path(tmp.name)
+
+    orch = get_orchestrator()
+    provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+    concurrency = 3 if provider in ["gemini", "openai", "huggingface"] else 1
+
+    async def event_generator():
+        try:
+            async for event in orch.scrape_resume_and_store_stream(
+                resume_path=tmp_path,
+                location=location,
+                max_roles=max(1, min(max_roles, 5)),
+                max_pages=max(1, min(max_pages, 10)),
+                date_posted=date_posted,
+                job_type=job_type,
+                work_type=work_type,
+                radius_km=radius_km,
+                country=country,
+                language=language,
+                max_jobs=max(1, min(max_jobs, 200)),
+                concurrency=concurrency,
+            ):
+                yield f"data: {event}\n\n"
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/api/v1/outreach/draft")
+async def draft_outreach(
+    resume: UploadFile = File(...),
+    job_id: str = Form(...),
+) -> dict[str, Any]:
+    if not resume.filename or not resume.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF resumes are supported")
+
+    suffix = f"_{uuid.uuid4().hex[:8]}.pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await resume.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        draft = await asyncio.to_thread(get_orchestrator().draft_outreach, tmp_path, job_id)
+        draft["attachment_name"] = resume.filename
+        return {"success": True, "draft": draft}
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.post("/api/v1/outreach/send")
+async def send_outreach(
+    resume: UploadFile = File(...),
+    job_id: str = Form(...),
+    recipient: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    approved: bool = Form(default=False),
+) -> dict[str, Any]:
+    if not approved:
+        raise HTTPException(400, "Explicit human approval is required before sending")
+    if not resume.filename or not resume.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF resumes are supported")
+
+    suffix = f"_{uuid.uuid4().hex[:8]}.pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(await resume.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        result = await get_orchestrator().send_outreach(
+            resume_path=tmp_path,
+            attachment_name=resume.filename,
+            job_id=job_id,
+            recipient=recipient,
+            subject=subject,
+            body=body,
+            approved=True,
+        )
+        return {"success": True, "sent": True, "result": str(result)}
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    except Exception as exc:
+        raise HTTPException(502, f"Email MCP send failed: {exc}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 @app.post("/api/v1/match", response_model=MatchResponse)
@@ -338,6 +471,9 @@ async def get_advice(
             source=target_payload.get("source"),
             source_url=target_payload.get("source_url"),
             apply_url=target_payload.get("apply_url"),
+            contact_emails=tuple(target_payload.get("contact_emails", [])),
+            contact_phones=tuple(target_payload.get("contact_phones", [])),
+            discovery_score=target_payload.get("discovery_score"),
 
         )
 
