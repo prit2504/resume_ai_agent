@@ -81,14 +81,20 @@ def build_client(provider: str, purpose: str) -> tuple[OpenAI, ProviderConnectio
 
 def provider_summary() -> dict[str, str | bool]:
     llm_name = os.environ.get("LLM_PROVIDER", "lmstudio").lower()
-    emb_name = os.environ.get("EMBEDDING_PROVIDER", "lmstudio").lower()
+    emb_name = os.environ.get("EMBEDDING_PROVIDER", "sentence_transformers").lower()
     llm = resolve_provider(llm_name, "llm")
-    emb = resolve_provider(emb_name, "embedding")
+    if emb_name == "sentence_transformers":
+        embedding_base_url = "local Python process"
+        embedding_provider = "sentence_transformers"
+    else:
+        emb = resolve_provider(emb_name, "embedding")
+        embedding_base_url = emb.base_url
+        embedding_provider = emb.name
     return {
         "llm_provider": llm.name,
         "llm_base_url": llm.base_url,
-        "embedding_provider": emb.name,
-        "embedding_base_url": emb.base_url,
+        "embedding_provider": embedding_provider,
+        "embedding_base_url": embedding_base_url,
         "extractor_model": os.environ.get("EXTRACTOR_MODEL", ""),
         "advisor_model": os.environ.get("ADVISOR_MODEL", ""),
         "embedding_model": os.environ.get("EMBED_MODEL", ""),
