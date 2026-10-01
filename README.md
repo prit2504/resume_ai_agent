@@ -115,7 +115,7 @@ The send endpoint rejects recipients that were not extracted from the same store
 
 ~~~dotenv
 EMAIL_MCP_TRANSPORT=streamable_http
-EMAIL_MCP_URL=http://localhost:8081/mcp
+EMAIL_MCP_URL=http://127.0.0.1:9000/mcp
 EMAIL_MCP_TOOL_NAME=send_email
 ~~~
 
@@ -128,7 +128,7 @@ EMAIL_MCP_ARGS_JSON=["path/to/email_mcp_server.py"]
 EMAIL_MCP_TOOL_NAME=send_email
 ~~~
 
-The adapter currently expects the send tool to accept `to`, `subject`, `body`, and an `attachments` array with `filename`, `content_type`, and `content_base64`.
+The bundled Email MCP tool is `send_email(to_email, subject, body, pdf_base64, pdf_filename)`. The Resume AI Agent sends the approved resume PDF as base64, so the backend and MCP server do not need a shared local file path.
 
 ## Search Improvements in this Branch
 
