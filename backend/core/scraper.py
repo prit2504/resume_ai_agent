@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Callable
 
 import httpx
 
 
 class SerpApiGoogleJobsScraper:
-    """Google Jobs scraper backed by SerpApi.
-
-    The adapter preserves the scraper interface used by the orchestrator:
-    search() returns stable job IDs and fetch_details() returns a normalized
-    detail object. SerpApi already includes the full job description in
-    jobs_results, so details are cached from the search response instead of
-    making one extra request per job.
-    """
+    """Google Jobs discovery adapter backed by SerpApi."""
 
     _ENDPOINT = "https://serpapi.com/search"
+    _TOKEN_RE = re.compile(r"[a-z0-9+#.]{2,}")
 
     def __init__(
         self,
@@ -34,36 +29,63 @@ class SerpApiGoogleJobsScraper:
         self._timeout = timeout
         self._no_cache = no_cache
         self._jobs: dict[str, dict[str, Any]] = {}
+        self._discovery_scores: dict[str, float] = {}
 
     @staticmethod
     def _stable_job_id(job: dict[str, Any]) -> str:
         if job.get("job_id"):
             return str(job["job_id"])
-
         identity = "|".join(
-            str(job.get(key) or "")
+            str(job.get(key) or "").strip().lower()
             for key in ("title", "company_name", "location", "share_link")
         )
         return f"serpapi-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:24]}"
 
     @staticmethod
+    def _dedupe_key(job: dict[str, Any]) -> str:
+        if job.get("job_id"):
+            return f"id:{job['job_id']}"
+        identity = "|".join(
+            str(job.get(key) or "").strip().lower()
+            for key in ("title", "company_name", "location")
+        )
+        return f"fp:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+
+    @classmethod
+    def _tokens(cls, text: str) -> set[str]:
+        return set(cls._TOKEN_RE.findall((text or "").lower()))
+
+    @classmethod
+    def _rank_job(cls, job: dict[str, Any], queries: list[str]) -> float:
+        query_tokens = set().union(*(cls._tokens(q) for q in queries))
+        if not query_tokens:
+            return 0.0
+        title_tokens = cls._tokens(str(job.get("title") or ""))
+        description_tokens = cls._tokens(str(job.get("description") or ""))
+        title_overlap = len(query_tokens & title_tokens) / max(len(query_tokens), 1)
+        description_overlap = len(query_tokens & description_tokens) / max(len(query_tokens), 1)
+
+        posted = str((job.get("detected_extensions") or {}).get("posted_at") or "").lower()
+        recency = 0.0
+        if "minute" in posted or "hour" in posted or "today" in posted:
+            recency = 1.0
+        elif "day" in posted or "yesterday" in posted:
+            recency = 0.8
+        elif "week" in posted:
+            recency = 0.5
+        elif "month" in posted:
+            recency = 0.2
+
+        return round((0.65 * title_overlap) + (0.25 * description_overlap) + (0.10 * recency), 4)
+
+    @staticmethod
     def _build_query(
         keywords: str,
-        location: str | None,
         date_posted: str | None,
         job_type: str | None,
-        experience_level: str | None,
         work_type: str | None,
-        easy_apply: bool,
-        sort_by: str | None,
-    ) -> tuple[str, str | None]:
+    ) -> str:
         terms = [keywords.strip()]
-        api_location = location.strip() if location else None
-
-        if api_location and api_location.lower() == "remote":
-            api_location = None
-            terms.append("remote")
-
         date_terms = {
             "past_hour": "posted in the last hour",
             "past_24_hours": "since yesterday",
@@ -75,40 +97,71 @@ class SerpApiGoogleJobsScraper:
             "part_time": "part time",
             "contract": "contract",
             "temporary": "temporary",
-            "volunteer": "volunteer",
             "internship": "internship",
-            "other": "",
-        }
-        experience_terms = {
-            "internship": "internship",
-            "entry": "entry level",
-            "associate": "associate",
-            "mid_senior": "mid senior",
-            "director": "director",
-            "executive": "executive",
         }
         work_type_terms = {
             "remote": "remote",
             "on_site": "on-site",
             "hybrid": "hybrid",
         }
-
         for value, mapping in (
             (date_posted, date_terms),
             (job_type, job_type_terms),
-            (experience_level, experience_terms),
             (work_type, work_type_terms),
         ):
             term = mapping.get(value or "")
             if term:
                 terms.append(term)
+        return " ".join(term for term in terms if term).strip()
 
-        if easy_apply:
-            terms.append('"easy apply"')
-        if sort_by == "date" and not date_posted:
-            terms.append("recent")
+    async def _fetch_query(
+        self,
+        query: str,
+        location: str | None,
+        max_pages: int,
+        radius_km: int | None,
+        country: str | None,
+        language: str | None,
+        uds: str | None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "engine": "google_jobs",
+            "q": query,
+            "api_key": self._api_key,
+            "google_domain": self._google_domain,
+            "output": "json",
+        }
+        if location:
+            params["location"] = location
+        if radius_km is not None:
+            params["lrad"] = radius_km
+        if country or self._gl:
+            params["gl"] = country or self._gl
+        if language or self._hl:
+            params["hl"] = language or self._hl
+        if uds:
+            params["uds"] = uds
+        if self._no_cache:
+            params["no_cache"] = "true"
 
-        return " ".join(term for term in terms if term).strip(), api_location
+        jobs: list[dict[str, Any]] = []
+        next_page_token: str | None = None
+
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for _ in range(max(1, max_pages)):
+                page_params = dict(params)
+                if next_page_token:
+                    page_params["next_page_token"] = next_page_token
+                response = await client.get(self._ENDPOINT, params=page_params)
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("error"):
+                    raise RuntimeError(f"SerpApi Google Jobs error: {payload['error']}")
+                jobs.extend(payload.get("jobs_results", []) or [])
+                next_page_token = (payload.get("serpapi_pagination") or {}).get("next_page_token")
+                if not next_page_token:
+                    break
+        return jobs
 
     async def search(
         self,
@@ -121,66 +174,94 @@ class SerpApiGoogleJobsScraper:
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        radius_km: int | None = None,
+        country: str | None = None,
+        language: str | None = None,
+        uds: str | None = None,
+        max_jobs: int = 50,
     ) -> list[str]:
-        """Search Google Jobs and cache result objects for downstream processing."""
-        if not self._api_key:
-            raise RuntimeError(
-                "SERPAPI_API_KEY is required. Add it to backend/.env before scraping."
-            )
-
-        query, api_location = self._build_query(
-            keywords=keywords,
+        queries = [keywords]
+        if experience_level:
+            queries[0] = f"{queries[0]} {experience_level.replace('_', ' ')}"
+        if easy_apply:
+            queries[0] = f'{queries[0]} "easy apply"'
+        if sort_by == "date" and not date_posted:
+            queries[0] = f"{queries[0]} recent"
+        return await self.search_many(
+            queries=queries,
             location=location,
+            max_pages=max_pages,
             date_posted=date_posted,
             job_type=job_type,
-            experience_level=experience_level,
             work_type=work_type,
-            easy_apply=easy_apply,
-            sort_by=sort_by,
+            radius_km=radius_km,
+            country=country,
+            language=language,
+            uds=uds,
+            max_jobs=max_jobs,
         )
 
-        params: dict[str, Any] = {
-            "engine": "google_jobs",
-            "q": query,
-            "api_key": self._api_key,
-            "google_domain": self._google_domain,
-            "output": "json",
-        }
-        if api_location:
-            params["location"] = api_location
-        if self._gl:
-            params["gl"] = self._gl
-        if self._hl:
-            params["hl"] = self._hl
-        if self._no_cache:
-            params["no_cache"] = "true"
+    async def search_many(
+        self,
+        queries: list[str],
+        location: str | None = None,
+        max_pages: int = 1,
+        date_posted: str | None = None,
+        job_type: str | None = None,
+        work_type: str | None = None,
+        radius_km: int | None = None,
+        country: str | None = None,
+        language: str | None = None,
+        uds: str | None = None,
+        max_jobs: int = 50,
+    ) -> list[str]:
+        if not self._api_key:
+            raise RuntimeError("SERPAPI_API_KEY is required. Add it to backend/.env before searching.")
+
+        clean_queries = list(dict.fromkeys(q.strip() for q in queries if q and q.strip()))
+        if not clean_queries:
+            return []
+
+        deduped: dict[str, dict[str, Any]] = {}
+        scores: dict[str, float] = {}
+
+        for raw_query in clean_queries:
+            query = self._build_query(raw_query, date_posted, job_type, work_type)
+            jobs = await self._fetch_query(
+                query=query,
+                location=location,
+                max_pages=max_pages,
+                radius_km=radius_km,
+                country=country,
+                language=language,
+                uds=uds,
+            )
+            for job in jobs:
+                key = self._dedupe_key(job)
+                score = self._rank_job(job, clean_queries)
+                if key not in deduped or score > scores[key]:
+                    enriched = dict(job)
+                    enriched["_matched_query"] = raw_query
+                    deduped[key] = enriched
+                    scores[key] = score
+
+        ranked = sorted(
+            ((job, scores[key]) for key, job in deduped.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )[: max(1, max_jobs)]
 
         self._jobs = {}
-        next_page_token: str | None = None
-
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            for _ in range(max(1, max_pages)):
-                page_params = dict(params)
-                if next_page_token:
-                    page_params["next_page_token"] = next_page_token
-
-                response = await client.get(self._ENDPOINT, params=page_params)
-                response.raise_for_status()
-                payload = response.json()
-
-                if payload.get("error"):
-                    raise RuntimeError(f"SerpApi Google Jobs error: {payload['error']}")
-
-                for job in payload.get("jobs_results", []) or []:
-                    job_id = self._stable_job_id(job)
-                    self._jobs[job_id] = job
-
-                pagination = payload.get("serpapi_pagination") or {}
-                next_page_token = pagination.get("next_page_token")
-                if not next_page_token:
-                    break
+        self._discovery_scores = {}
+        for job, score in ranked:
+            job_id = self._stable_job_id(job)
+            self._jobs[job_id] = job
+            self._discovery_scores[job_id] = score
 
         return list(self._jobs.keys())
+
+    def get_discovery_score(self, job_id: str) -> float | None:
+        return self._discovery_scores.get(job_id)
 
     @staticmethod
     def _format_job_text(job: dict[str, Any]) -> str:
@@ -191,7 +272,6 @@ class SerpApiGoogleJobsScraper:
             f"Location: {job.get('location') or ''}",
             f"Source: {job.get('via') or 'Google Jobs'}",
         ]
-
         if detected.get("posted_at"):
             lines.append(f"Posted: {detected['posted_at']}")
         if detected.get("schedule_type"):
@@ -215,32 +295,22 @@ class SerpApiGoogleJobsScraper:
             lines.extend(["", "Application options:"])
             for option in apply_options:
                 if option.get("link"):
-                    lines.append(
-                        f"- {option.get('title') or 'Apply'}: {option['link']}"
-                    )
-
+                    lines.append(f"- {option.get('title') or 'Apply'}: {option['link']}")
         return "\n".join(lines).strip()
 
     async def fetch_details(self, job_id: str) -> dict[str, Any]:
-        """Return a normalized detail object from the cached SerpApi result."""
         job = self._jobs.get(job_id)
         if not job:
             raise KeyError(f"Job ID not found in current SerpApi result set: {job_id}")
-
-        return {
-            "sections": {"job_posting": self._format_job_text(job)},
-            "serpapi_job": job,
-        }
+        return {"sections": {"job_posting": self._format_job_text(job)}, "serpapi_job": job}
 
     async def fetch_all_details(
         self,
         job_ids: list[str],
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> dict[str, dict[str, Any]]:
-        """Return cached details while preserving the orchestrator contract."""
         results: dict[str, dict[str, Any]] = {}
         total = len(job_ids)
-
         for idx, job_id in enumerate(job_ids, start=1):
             try:
                 results[job_id] = await self.fetch_details(job_id)
@@ -249,5 +319,4 @@ class SerpApiGoogleJobsScraper:
             except Exception as exc:
                 if progress_callback:
                     progress_callback(idx, total, f"{job_id} (ERROR: {exc})")
-
         return results
