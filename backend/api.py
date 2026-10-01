@@ -31,6 +31,7 @@ from core.fixture_scraper import LocalFixtureJobsScraper
 from core.providers import build_client, provider_summary
 from core.extractor import LLMJobExtractor
 from core.embedder import UniversalEmbedder
+from core.local_embedder import LocalSentenceTransformerEmbedder
 from core.vector_store import QdrantVectorStore
 from core.resume_parser import PDFResumeParser
 from core.advisor import LLMResumeAdvisor
@@ -66,15 +67,10 @@ def get_orchestrator() -> JobMatcherOrchestrator:
     global _orch
     if _orch is None:
         provider = os.environ.get("LLM_PROVIDER", "lmstudio").lower()
-        emb_provider = os.environ.get("EMBEDDING_PROVIDER", "lmstudio").lower()
+        emb_provider = os.environ.get("EMBEDDING_PROVIDER", "sentence_transformers").lower()
 
         llm_client, llm_connection = build_client(provider, "llm")
-        embed_client, embed_connection = build_client(emb_provider, "embedding")
-
-        print(
-            f"LLM provider: {llm_connection.name} @ {llm_connection.base_url} | "
-            f"Embedding provider: {embed_connection.name} @ {embed_connection.base_url}"
-        )
+        print(f"LLM provider: {llm_connection.name} @ {llm_connection.base_url}")
 
         job_source = os.environ.get("JOB_SOURCE", "serpapi").lower()
         if job_source == "fixture":
@@ -105,11 +101,32 @@ def get_orchestrator() -> JobMatcherOrchestrator:
             client=llm_client,
             model=extractor_model,
         )
-        embedder = UniversalEmbedder(
-            client=embed_client,
-            model=os.environ.get("EMBED_MODEL", "nomic-embed-text:v1.5"),
-            dimension=int(os.environ.get("EMBED_DIM", "768")),
-        )
+        if emb_provider == "sentence_transformers":
+            embedder = LocalSentenceTransformerEmbedder(
+                model_name=os.environ.get(
+                    "LOCAL_EMBED_MODEL",
+                    "sentence-transformers/all-MiniLM-L6-v2",
+                ),
+                device=os.environ.get("LOCAL_EMBED_DEVICE") or None,
+                normalize_embeddings=os.environ.get(
+                    "LOCAL_EMBED_NORMALIZE", "true"
+                ).lower() == "true",
+            )
+            print(
+                f"Embedding provider: sentence-transformers | "
+                f"dimension={embedder.dimension}"
+            )
+        else:
+            embed_client, embed_connection = build_client(emb_provider, "embedding")
+            embedder = UniversalEmbedder(
+                client=embed_client,
+                model=os.environ.get("EMBED_MODEL", "nomic-embed-text:v1.5"),
+                dimension=int(os.environ.get("EMBED_DIM", "768")),
+            )
+            print(
+                f"Embedding provider: {embed_connection.name} @ "
+                f"{embed_connection.base_url} | dimension={embedder.dimension}"
+            )
         qdrant = QdrantClient(
             url=os.environ.get("QDRANT_URL", "http://localhost:6333"),
             api_key=os.environ.get("QDRANT_API_KEY"),
