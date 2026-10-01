@@ -27,6 +27,8 @@ load_dotenv()
 
 from core.models import JobPosting
 from core.scraper import SerpApiGoogleJobsScraper
+from core.fixture_scraper import LocalFixtureJobsScraper
+from core.providers import build_client, provider_summary
 from core.extractor import LLMJobExtractor
 from core.embedder import UniversalEmbedder
 from core.vector_store import QdrantVectorStore
@@ -63,55 +65,39 @@ def get_orchestrator() -> JobMatcherOrchestrator:
     """Singleton orchestrator with lazy initialization."""
     global _orch
     if _orch is None:
-        provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
-        emb_provider = os.environ.get("EMBEDDING_PROVIDER", "ollama").lower()
-        
-        # Default to ollama configurations
-        llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
-        llm_api_key = "local"
-        embed_base_url = os.environ.get("EMBED_BASE_URL", "http://localhost:11434/v1")
-        embed_api_key = "local"
+        provider = os.environ.get("LLM_PROVIDER", "lmstudio").lower()
+        emb_provider = os.environ.get("EMBEDDING_PROVIDER", "lmstudio").lower()
 
-        if provider == "openai":
-            llm_base_url = "https://api.openai.com/v1"
-            llm_api_key = os.environ.get("OPENAI_API_KEY", "")
-        elif provider == "gemini":
-            llm_base_url = embed_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-            llm_api_key = os.environ.get("GEMINI_API_KEY", "")
-        elif provider == "huggingface":
-            llm_base_url = "https://router.huggingface.co/v1"
-            llm_api_key = os.environ.get("HF_TOKEN", "")
+        llm_client, llm_connection = build_client(provider, "llm")
+        embed_client, embed_connection = build_client(emb_provider, "embedding")
 
-        if emb_provider == "openai":
-            embed_base_url = "https://api.openai.com/v1"
-            embed_api_key = os.environ.get("OPENAI_API_KEY", "")
-        elif emb_provider == "gemini":
-            embed_base_url = embed_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-            embed_api_key = os.environ.get("GEMINI_API_KEY", "")
-        elif emb_provider == "huggingface":
-            embed_base_url = "https://router.huggingface.co/v1"
-            embed_api_key = os.environ.get("HF_TOKEN", "")
-
-        llm_client = OpenAI(
-            base_url=llm_base_url,
-            api_key=llm_api_key,
-        )
-        embed_client = OpenAI(
-            base_url=embed_base_url,
-            api_key=embed_api_key,
+        print(
+            f"LLM provider: {llm_connection.name} @ {llm_connection.base_url} | "
+            f"Embedding provider: {embed_connection.name} @ {embed_connection.base_url}"
         )
 
-        scraper = SerpApiGoogleJobsScraper(
-            api_key=os.environ.get("SERPAPI_API_KEY", ""),
-            google_domain=os.environ.get("SERPAPI_GOOGLE_DOMAIN", "google.com"),
-            gl=os.environ.get("SERPAPI_GL") or None,
-            hl=os.environ.get("SERPAPI_HL", "en") or None,
-            timeout=float(os.environ.get("SERPAPI_TIMEOUT_SECONDS", "30")),
-            no_cache=os.environ.get("SERPAPI_NO_CACHE", "false").lower() == "true",
-        )
+        job_source = os.environ.get("JOB_SOURCE", "serpapi").lower()
+        if job_source == "fixture":
+            scraper = LocalFixtureJobsScraper(
+                os.environ.get("LOCAL_JOBS_FIXTURE", "fixtures/jobs.json")
+            )
+        elif job_source == "serpapi":
+            scraper = SerpApiGoogleJobsScraper(
+                api_key=os.environ.get("SERPAPI_API_KEY", ""),
+                google_domain=os.environ.get("SERPAPI_GOOGLE_DOMAIN", "google.com"),
+                gl=os.environ.get("SERPAPI_GL") or None,
+                hl=os.environ.get("SERPAPI_HL", "en") or None,
+                timeout=float(os.environ.get("SERPAPI_TIMEOUT_SECONDS", "30")),
+                no_cache=os.environ.get("SERPAPI_NO_CACHE", "false").lower() == "true",
+            )
+        else:
+            raise RuntimeError(
+                f"Unsupported JOB_SOURCE '{job_source}'. Use 'serpapi' or 'fixture'."
+            )
+
         
         # Backward compatibility fallback
-        fallback_model = os.environ.get("LLM_MODEL", "gemma3:4b")
+        fallback_model = os.environ.get("LLM_MODEL", "local-model")
         extractor_model = os.environ.get("EXTRACTOR_MODEL", fallback_model)
         advisor_model = os.environ.get("ADVISOR_MODEL", fallback_model)
         
@@ -195,6 +181,12 @@ class AdviceResponse(BaseModel):
 
 # ── API Endpoints ────────────────────────────────────────────────────────────
 
+@app.get("/api/v1/config")
+async def runtime_config() -> dict[str, Any]:
+    """Return non-secret runtime configuration for local setup/debugging."""
+    return {"success": True, "config": provider_summary()}
+
+
 @app.post("/api/v1/scrape", response_model=dict)
 async def scrape_jobs(req: ScrapeRequest) -> dict[str, Any]:
     """Search Google Jobs through SerpApi and store results in Qdrant."""
@@ -222,8 +214,8 @@ async def scrape_jobs(req: ScrapeRequest) -> dict[str, Any]:
 async def scrape_jobs_stream(req: ScrapeRequest):
     """Stream SSE events during a scrape."""
     orch = get_orchestrator()
-    provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
-    concurrency = 3 if provider in ["gemini", "openai", "huggingface"] else 1
+    provider = os.environ.get("LLM_PROVIDER", "lmstudio").lower()
+    concurrency = int(os.environ.get("LLM_CONCURRENCY", "1" if provider in ["lmstudio", "ollama", "custom"] else "3"))
     
     async def event_generator():
         async for event in orch.scrape_and_store_stream(
