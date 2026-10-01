@@ -73,6 +73,21 @@ class QdrantVectorStore:
         ).points
         return [{**r.payload, "score": r.score} for r in results if r.payload]
 
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        """Retrieve one stored job by its stable external job ID."""
+        point_id = self._point_id(job_id)
+        try:
+            points = self._client.retrieve(
+                collection_name=self._collection,
+                ids=[point_id],
+                with_payload=True,
+            )
+            if points and points[0].payload:
+                return dict(points[0].payload)
+        except Exception:
+            return None
+        return None
+
     def get_first_seen(self, point_id: str) -> datetime | None:
         try:
             pts = self._client.retrieve(
