@@ -97,8 +97,8 @@ def provider_summary() -> dict[str, str | bool]:
         "embedding_base_url": embedding_base_url,
         "extractor_model": os.environ.get("EXTRACTOR_MODEL", ""),
         "advisor_model": os.environ.get("ADVISOR_MODEL", ""),
-        "embedding_model": os.environ.get("EMBED_MODEL", ""),
-        "job_source": os.environ.get("JOB_SOURCE", "serpapi").lower(),
+        "embedding_model": os.environ.get("LOCAL_EMBED_MODEL") or os.environ.get("EMBED_MODEL", ""),
+        "job_source": os.environ.get("JOB_SOURCE", "fixture").lower(),
         "serpapi_configured": bool(os.environ.get("SERPAPI_API_KEY")),
         "email_mcp_configured": bool(
             os.environ.get("EMAIL_MCP_URL") or os.environ.get("EMAIL_MCP_COMMAND")
