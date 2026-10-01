@@ -7,8 +7,8 @@ class LLMJobExtractor:
     """Strategy: Use local LLM for structured extraction."""
 
     SYSTEM_PROMPT: Final[str] = (
-        "You are an information extraction engine for LinkedIn job postings.\n"
-        "Given the raw text of a LinkedIn job posting, extract structured fields.\n\n"
+        "You are an information extraction engine for job postings discovered through Google Jobs.\n"
+        "Given the raw text of a job posting, extract structured fields.\n\n"
         "Respond with STRICT JSON ONLY — no markdown fences, no commentary.\n"
         "Use null for anything not mentioned. Keep lists short and deduplicated.\n\n"
         "IMPORTANT about dates: do NOT calculate an actual calendar date.\n"
