@@ -82,3 +82,15 @@ npm run dev
 ~~~
 
 No LinkedIn login or MCP process is required.
+
+
+## Human-in-the-loop Recruiter Outreach
+
+The ingestion pipeline extracts literal emails and phone numbers from job source text. It may prefer recruiter/talent/HR-looking email addresses when several exist, but it never generates an address.
+
+- `POST /api/v1/outreach/draft` creates an editable draft from the stored job and uploaded resume.
+- `POST /api/v1/outreach/send` requires `approved=true`, validates the recipient belongs to that exact job, and calls the configured email MCP tool with the PDF resume attached.
+
+## Resume-driven Discovery
+
+`POST /api/v1/scrape/resume/stream` parses the resume, selects up to three target roles, searches Google Jobs for each role, combines results, deduplicates overlapping listings, ranks them, then runs the normal extraction/embedding/storage workflow.
