@@ -1471,7 +1471,7 @@ function ScrapeSection({
             <option value="au">Australia</option>
             <option value="in">India</option>
             <option value="us">United States</option>
-            <option value="gb">United Kingdom</option>
+            <option value="uk">United Kingdom</option>
             <option value="ca">Canada</option>
           </select>
         </div>
