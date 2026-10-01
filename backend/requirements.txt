@@ -28,3 +28,7 @@ pydantic>=2.7.0
 # CLI & utilities
 python-dotenv>=1.0.0
 
+
+
+# Optional local embeddings (recommended for zero-cost local setup)
+sentence-transformers>=3.0.0
