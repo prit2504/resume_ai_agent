@@ -2,7 +2,7 @@
 
 An AI-powered job discovery, resume matching, career-advice, and recruiter-outreach system.
 
-This branch extends the original job matcher into a complete human-in-the-loop workflow:
+This branch extends the original job matcher into a **local-first, human-in-the-loop AI job-search and recruiter-outreach workflow**:
 
 - discover jobs from Google Jobs through SerpApi
 - run fully offline with local fixture jobs during development
@@ -20,7 +20,9 @@ The project is designed to run without paid LLM APIs by using **LM Studio + sent
 
 ---
 
-## Workflow
+## End-to-End Workflow
+
+> This is the single canonical workflow diagram for `feature/serpapi-outreach-hitl`.
 
 ```mermaid
 flowchart TD
@@ -326,67 +328,21 @@ The server validates the recipient and PDF attachment before sending through SMT
 
 ---
 
-## Architecture
+## System Architecture Summary
+
+The Mermaid workflow above is the canonical architecture for this branch. In short:
 
 ```text
-                         ┌───────────────────────────┐
-                         │       Next.js UI          │
-                         └─────────────┬─────────────┘
-                                       │ REST + SSE
-                                       ▼
-                         ┌───────────────────────────┐
-                         │         FastAPI           │
-                         │ JobMatcherOrchestrator    │
-                         └─────────────┬─────────────┘
-                                       │
-            ┌──────────────────────────┼──────────────────────────┐
-            │                          │                          │
-            ▼                          ▼                          ▼
-   ┌─────────────────┐       ┌──────────────────┐      ┌─────────────────┐
-   │ Job Discovery   │       │ LLM Processing   │      │ Resume Pipeline │
-   │                 │       │                  │      │                 │
-   │ Fixture         │       │ LM Studio        │      │ PDF Parser      │
-   │ or SerpApi      │       │ Ollama           │      │ Target Roles    │
-   └────────┬────────┘       │ Hugging Face     │      │ Resume Advice   │
-            │                │ OpenAI-compatible│      └────────┬────────┘
-            │                └────────┬─────────┘               │
-            └─────────────────────────┼─────────────────────────┘
-                                      ▼
-                         ┌───────────────────────────┐
-                         │ sentence-transformers    │
-                         │ Local Embeddings         │
-                         └─────────────┬─────────────┘
-                                       ▼
-                              ┌─────────────────┐
-                              │     Qdrant      │
-                              │  Vector Search  │
-                              └────────┬────────┘
-                                       ▼
-                              ┌─────────────────┐
-                              │ Matched Jobs UI │
-                              └────────┬────────┘
-                                       │
-                          Recruiter contact found?
-                              │               │
-                             No              Yes
-                              │               │
-                              ▼               ▼
-                         View / Apply    Draft HR Email
-                                              │
-                                              ▼
-                                         Human Review
-                                              │
-                                        Approve & Send
-                                              │
-                                              ▼
-                                     ┌─────────────────┐
-                                     │    Email MCP    │
-                                     └────────┬────────┘
-                                              ▼
-                                         SMTP / Gmail
+Next.js UI
+   ↓ REST + SSE
+FastAPI / JobMatcherOrchestrator
+   ├─ Job source: fixture or SerpApi Google Jobs
+   ├─ LLM: LM Studio / Ollama / Hugging Face / other OpenAI-compatible provider
+   ├─ Embeddings: local sentence-transformers by default
+   ├─ Vector search: Qdrant
+   └─ Outreach: contact extraction → draft → human approval → Email MCP → SMTP
 ```
 
----
 
 ## Zero-Cost Local Stack
 
